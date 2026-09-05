@@ -9,7 +9,7 @@ const messages = {
       "This PDF is a standalone attachment. Attach it to a Zotero bibliographic item first; the new notes PDF will be stored under that same item.",
     parentUnavailable:
       "The parent bibliographic item is missing or in the trash. Restore it, or move the PDF under an available bibliographic item first.",
-    created: "Handwritten notes PDF created. Click the sticky note to open it.",
+    created: "Handwritten notes PDF created.",
     createFailed: "The handwritten sticky note could not be created.",
     openFailed: "The linked handwritten notes PDF could not be opened.",
     targetDeleted: "The linked notes attachment has been deleted or no longer exists.",
@@ -19,6 +19,8 @@ const messages = {
     addingPage: "Saving ink and adding a blank page…",
     pageAdded: "Blank page added.",
     pageFailed: "The blank page could not be added. Check the error details before retrying.",
+    closeSaveFailed:
+      "The notes window stayed open because Zotero could not confirm that the latest handwriting was saved. Check the error details, then retry closing it.",
     pageRecoveryFailed:
       "The blank page could not be added, and automatic recovery did not complete. Stop editing this attachment and keep the reported recovery copy.",
     pageSavedRefreshFailed:
@@ -38,7 +40,7 @@ const messages = {
       "当前 PDF 是独立附件。请先把它挂到一条 Zotero 文献记录下；新的笔记 PDF 会作为普通附件保存在同一条记录下。",
     parentUnavailable:
       "当前 PDF 的父文献记录缺失或位于回收站。请先恢复父记录，或将 PDF 移到另一条可用文献记录下。",
-    created: "手写笔记 PDF 已创建。单击便签即可打开。",
+    created: "手写笔记 PDF 已创建。",
     createFailed: "无法创建手写便签。",
     openFailed: "无法打开关联的手写笔记 PDF。",
     targetDeleted: "关联的笔记附件已删除或已不存在。",
@@ -48,6 +50,8 @@ const messages = {
     addingPage: "正在保存笔迹并添加空白页…",
     pageAdded: "空白页已添加。",
     pageFailed: "无法添加空白页。请检查错误详情后再重试。",
+    closeSaveFailed:
+      "笔记窗口仍保持打开，因为 Zotero 无法确认最新笔迹已经保存。请检查错误详情后再尝试关闭。",
     pageRecoveryFailed:
       "无法添加空白页，且自动恢复未完成。请停止编辑该附件，并保留错误详情中列出的恢复副本。",
     pageSavedRefreshFailed: "页面已经保存，但阅读器刷新失败。请重新打开笔记附件。",
@@ -70,8 +74,12 @@ export function alertError(
   key: MessageKey,
   error?: unknown,
 ): void {
-  const details =
-    error instanceof Error ? `\n\n${error.message}` : error ? `\n\n${String(error)}` : "";
+  let detailText = error instanceof Error ? error.message : error ? String(error) : "";
+  if (error instanceof Error && error.cause && error.cause !== error) {
+    const causeText = error.cause instanceof Error ? error.cause.message : String(error.cause);
+    if (causeText && causeText !== detailText) detailText += `\nCause: ${causeText}`;
+  }
+  const details = detailText ? `\n\n${detailText}` : "";
   Zotero.alert((parent ?? undefined) as Window, "Zotero PDF Sticky Notes", message(key) + details);
 }
 

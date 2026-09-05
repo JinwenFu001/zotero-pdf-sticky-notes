@@ -104,11 +104,13 @@ annotation key；它不再跨 Gecko compartment 覆写 `setTool` 或 `addAnnotat
 同时匹配该 key 和 reader instance ID 才会创建笔记附件。用户切换工具会取消捕获，避免把
 普通原生便签误认成插件便签。超时会清除 pending state、切回 pointer 工具并显示提示。
 
+创建事务成功后会立即进入同一打开流程；以后可从便签再次触发。
+
 ## 打开流程
 
 ```text
-左键短按插件便签
-→ 兼容层从阅读器选择状态定位 annotation
+首次创建完成，或左键短按插件便签
+→ 兼容层从 annotation DOM 的 data-annotation-id 定位条目
 → 验证插件 marker
 → 解析 Zotero item URI
 → 验证 library / parent / stored PDF / delete state
@@ -118,8 +120,10 @@ annotation key；它不再跨 Gecko compartment 覆写 `setTool` 或 `addAnnotat
 → 激活原生批注即时保存与关闭保护
 ```
 
-左键激活要求一次短按移动不超过 5 像素，并且命中当前唯一选中的插件便签。监听逻辑不拦截
-未带插件 marker 的普通便签。右键“打开手写笔记”是辅助入口。
+左键激活要求一次短按移动不超过 5 像素。Zotero 9.0.6 对 note icon 提供
+`data-annotation-id`；兼容层只接受这一本次事件路径中的精确标识，不复用先前的阅读器选择
+状态。解析条目并检查插件 marker 之后才关闭原生 popup 和打开附件，所以未带 marker 的
+普通便签保持原生行为。右键“打开手写笔记”是辅助入口。
 
 窗口初始目标尺寸为 760 × 680 像素，并根据可用屏幕范围缩小。窗口复用、移动、缩放、位于
 原文前方以及关闭后焦点回原文均需在 `Z-07` 中验证，目前为 `NOT RUN`。
@@ -147,9 +151,13 @@ settlement barrier；底层下载真正 resolve/reject 前，后续打开或加�
 插件不实现自有绘图或手势代码。墨迹、擦除和撤销均由 Zotero native ink annotation 处理。
 笔记阅读器打开后，兼容层把该 reader 的 annotation saving debounce 切为立即保存，并在关闭
 时检查未保存集合。Zotero 9.0.6 的 host 保存桥不会把保存 rejection 传回 iframe，因此兼容层
-同时锁存保存期间意外进入只读状态。Zotero 的擦除回调也不会被 annotation manager await；
-兼容层跟踪该 host Promise，使加页、关闭和 reload 都等待擦除事务，并传播失败；卡死事务
-在 15 秒后作为失败返回，避免保存屏障永久挂起。
+同时锁存保存期间意外进入只读状态。Zotero 的 annotation manager 每次保存都会调用删除
+dispatcher，即使删除列表为空，而且不会 await chrome 侧删除回调。跨 compartment 的 host
+Promise 不能作为可靠完成信号；兼容层因此忽略空删除批次，对真实非空擦除先记录原
+annotation item ID，再等待这些旧条目从 Zotero item cache 消失。加页、关闭和 reload 都经过
+该屏障；15 秒仍未完成时作为失败返回，避免永久挂起。如果阅读器内部 manager 被替换，
+兼容层会销毁旧 manager 的 pending/failure 状态后重新绑定；普通 page reload 不会伪造一次
+manager 替换。
 
 如果关闭时仍有保存任务或未保存 annotation，close guard 会冻结 reader、触发保存并在成功
 后重新关闭。对标签式 reader，guard 直接包装 `ReaderTab.close()`，在 Zotero 移除内部输入
@@ -249,16 +257,14 @@ ink annotation 属于可同步的数据形态，因此设计目标包括“Mac �
 
 - `_iframeWindow.wrappedJSObject._reader`（`_internalReader` 仅作旧环境/测试 fallback）
 - `_primaryView` / `_secondaryView`
-- `pointerEventToPosition`
-- `getSelectableAnnotations`
-- `selectedAnnotationIDs`
+- PDF annotation DOM `data-annotation-id` / `Event.composedPath()`
 - `_annotationManager`
 - `_annotations`
 - `_unsavedAnnotations`
 - `_savingInProgress`
 - `_triggerSaving`
 - `_skipAnnotationSavingDebounce`
-- `_onDeleteAnnotations`
+- annotation manager `_onDelete`
 - `setReadOnly`
 - `setTool`
 - Reader `_readers`

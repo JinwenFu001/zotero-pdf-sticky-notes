@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   beginReaderNotePlacement,
+  bindStickyActivation,
   enableImmediateAnnotationSaving,
   flushReaderAnnotations,
   initializeReaderHooks,
@@ -12,6 +13,7 @@ import {
   withPDFWorkerSerialized,
   withReaderOpeningPaused,
 } from "../src/compat/zotero-9-reader";
+import { STICKY_TAG } from "../src/constants";
 import type { ReaderLike } from "../src/types";
 
 function makeWindow(): Window {
@@ -25,12 +27,25 @@ function makeWindow(): Window {
   return window;
 }
 
-function inputEvent(type: "pointerdown" | "mousedown", pointerType?: string): Event {
+function inputEvent(
+  type: "pointerdown" | "mousedown" | "pointerup",
+  pointerType?: string,
+  annotationID?: string,
+): Event {
   const event = new Event(type);
   Object.defineProperties(event, {
     button: { value: 0 },
+    clientX: { value: 48 },
+    clientY: { value: 64 },
     pointerType: { value: pointerType },
   });
+  if (annotationID) {
+    const marker = {
+      dataset: { annotationId: annotationID },
+      getAttribute: (name: string) => (name === "data-annotation-id" ? annotationID : undefined),
+    };
+    Object.defineProperty(event, "composedPath", { value: () => [marker] });
+  }
   return event;
 }
 
@@ -82,6 +97,160 @@ describe("Zotero 9 reader compatibility", () => {
       },
     } as unknown as ReaderLike;
     expect(setReaderTool(accepted, { type: "note" })).toBe(true);
+  });
+
+  it("activates the exact sticky ID exposed by Zotero's annotation DOM", async () => {
+    const annotation = {
+      id: 31,
+      key: "STICKY31",
+      libraryID: 1,
+      annotationType: "note",
+      isAnnotation: () => true,
+      getTags: () => [{ tag: STICKY_TAG, type: 0 }],
+      loadDataType: vi.fn(async () => undefined),
+    };
+    Object.assign(Zotero, {
+      Items: {
+        getByLibraryAndKey: vi.fn((_libraryID: number, key: string) =>
+          key === annotation.key ? annotation : false,
+        ),
+        get: vi.fn(() => false),
+      },
+    });
+
+    const viewWindow = makeWindow();
+    const view = {
+      initializedPromise: Promise.resolve(),
+      _iframeWindow: viewWindow,
+      _selectedAnnotationIDs: ["SOMEONEELSE"],
+      pointerEventToPosition: vi.fn(() => null),
+      getSelectableAnnotations: vi.fn(() => []),
+    };
+    const internal = {
+      _primaryView: view,
+      _createView: vi.fn(),
+      _updateState: vi.fn(),
+    };
+    const outerWindow = makeWindow() as Window & { wrappedJSObject: { _reader: typeof internal } };
+    outerWindow.wrappedJSObject = { _reader: internal };
+    const reader = {
+      itemID: 7,
+      _item: { libraryID: 1 },
+      _window: makeWindow(),
+      _iframeWindow: outerWindow,
+    } as unknown as ReaderLike;
+    const activated = vi.fn();
+
+    await bindStickyActivation(reader, activated);
+    viewWindow.dispatchEvent(inputEvent("mousedown", undefined, annotation.key));
+    viewWindow.dispatchEvent(inputEvent("pointerup"));
+
+    await vi.waitFor(() => expect(activated).toHaveBeenCalledWith(annotation, reader));
+    expect(view.pointerEventToPosition).not.toHaveBeenCalled();
+    expect(view.getSelectableAnnotations).not.toHaveBeenCalled();
+    expect(internal._updateState).toHaveBeenCalledWith({
+      primaryViewAnnotationPopup: null,
+      secondaryViewAnnotationPopup: null,
+    });
+  });
+
+  it("does not reuse a previously selected sticky when the click has no annotation DOM ID", async () => {
+    const annotation = {
+      id: 32,
+      key: "STICKY32",
+      libraryID: 1,
+      annotationType: "note",
+      isAnnotation: () => true,
+      getTags: () => [{ tag: STICKY_TAG, type: 0 }],
+      loadDataType: vi.fn(async () => undefined),
+    };
+    Object.assign(Zotero, {
+      Items: {
+        getByLibraryAndKey: vi.fn((_libraryID: number, key: string) =>
+          key === annotation.key ? annotation : false,
+        ),
+        get: vi.fn(() => false),
+      },
+    });
+
+    const viewWindow = makeWindow();
+    const view = {
+      initializedPromise: Promise.resolve(),
+      _iframeWindow: viewWindow,
+      _selectedAnnotationIDs: [annotation.key],
+      pointerEventToPosition: vi.fn(() => null),
+      getSelectableAnnotations: vi.fn(() => []),
+    };
+    const internal = {
+      _primaryView: view,
+      _createView: vi.fn(),
+      _updateState: vi.fn(),
+    };
+    const outerWindow = makeWindow() as Window & { wrappedJSObject: { _reader: typeof internal } };
+    outerWindow.wrappedJSObject = { _reader: internal };
+    const reader = {
+      itemID: 8,
+      _item: { libraryID: 1 },
+      _window: makeWindow(),
+      _iframeWindow: outerWindow,
+    } as unknown as ReaderLike;
+    const activated = vi.fn();
+
+    await bindStickyActivation(reader, activated);
+    viewWindow.dispatchEvent(inputEvent("mousedown"));
+    viewWindow.dispatchEvent(inputEvent("pointerup"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(activated).not.toHaveBeenCalled();
+    expect(view.pointerEventToPosition).not.toHaveBeenCalled();
+    expect(view.getSelectableAnnotations).not.toHaveBeenCalled();
+  });
+
+  it("leaves an ordinary Zotero note's native click behavior untouched", async () => {
+    const annotation = {
+      id: 33,
+      key: "ORDINARY",
+      libraryID: 1,
+      annotationType: "note",
+      isAnnotation: () => true,
+      getTags: () => [],
+      loadDataType: vi.fn(async () => undefined),
+    };
+    Object.assign(Zotero, {
+      Items: {
+        getByLibraryAndKey: vi.fn(() => annotation),
+        get: vi.fn(() => false),
+      },
+    });
+
+    const viewWindow = makeWindow();
+    const view = {
+      initializedPromise: Promise.resolve(),
+      _iframeWindow: viewWindow,
+      _selectedAnnotationIDs: [annotation.key],
+    };
+    const internal = {
+      _primaryView: view,
+      _createView: vi.fn(),
+      _updateState: vi.fn(),
+    };
+    const outerWindow = makeWindow() as Window & { wrappedJSObject: { _reader: typeof internal } };
+    outerWindow.wrappedJSObject = { _reader: internal };
+    const reader = {
+      itemID: 9,
+      _item: { libraryID: 1 },
+      _window: makeWindow(),
+      _iframeWindow: outerWindow,
+    } as unknown as ReaderLike;
+    const activated = vi.fn();
+
+    await bindStickyActivation(reader, activated);
+    viewWindow.dispatchEvent(inputEvent("mousedown", undefined, annotation.key));
+    viewWindow.dispatchEvent(inputEvent("pointerup"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(activated).not.toHaveBeenCalled();
+    expect(internal._updateState).not.toHaveBeenCalled();
   });
 
   it("uses the iframe reader and captures the exact native mouse-note key", () => {
@@ -357,21 +526,24 @@ describe("Zotero 9 reader compatibility", () => {
     await expect(flushReaderAnnotations(reader)).rejects.toThrow(/failed to save handwritten/);
   });
 
-  it("waits for Zotero's unawaited erase transaction", async () => {
-    let release!: () => void;
-    const deletion = new Promise<void>((resolve) => {
-      release = resolve;
+  it("ignores empty delete batches without assimilating the host callback result", async () => {
+    const thenAccess = vi.fn(() => {
+      throw new Error("Permission denied to access cross-compartment promise");
     });
+    const opaqueResult = {};
+    Object.defineProperty(opaqueResult, "then", { get: thenAccess });
+    const originalDelete = vi.fn((_ids: string[]) => opaqueResult);
+    const manager = {
+      _skipAnnotationSavingDebounce: false,
+      _savingInProgress: false,
+      _unsavedAnnotations: new Set<string>(),
+      _triggerSaving: vi.fn(async () => undefined),
+      _onDelete: originalDelete,
+    };
     const internal = {
       _state: { readOnly: false },
-      _annotationManager: {
-        _skipAnnotationSavingDebounce: false,
-        _savingInProgress: false,
-        _unsavedAnnotations: new Set<string>(),
-        _triggerSaving: vi.fn(async () => undefined),
-      },
+      _annotationManager: manager,
       setReadOnly: vi.fn(),
-      _onDeleteAnnotations: vi.fn((_ids: string[]) => deletion),
     };
     const reader = {
       itemID: 7,
@@ -379,65 +551,147 @@ describe("Zotero 9 reader compatibility", () => {
       _internalReader: internal,
     } as unknown as ReaderLike;
     enableImmediateAnnotationSaving(reader);
-    internal._onDeleteAnnotations(["erased-ink"]);
 
-    let flushed = false;
-    const flush = flushReaderAnnotations(reader).then(() => {
-      flushed = true;
-    });
-    await Promise.resolve();
-    expect(flushed).toBe(false);
-    release();
-    await flush;
-    expect(flushed).toBe(true);
+    expect(manager._onDelete([])).toBe(opaqueResult);
+    await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
+
+    expect(originalDelete).toHaveBeenCalledWith([]);
+    expect(thenAccess).not.toHaveBeenCalled();
   });
 
-  it("propagates a failed erase transaction instead of treating it as saved", async () => {
-    const internal = {
-      _state: { readOnly: false },
-      _annotationManager: {
+  it("accepts complete erase of ink that had no saved database row", async () => {
+    const attachment = { id: 71, libraryID: 1 };
+    const getAsync = vi.fn(async () => {
+      throw new Error("No item ID should be polled when the lookup returned no row");
+    });
+    Object.assign(Zotero, {
+      DB: { valueQueryAsync: vi.fn(async () => false) },
+      Items: { get: vi.fn(() => false), getAsync },
+    });
+    const manager = {
+      _skipAnnotationSavingDebounce: false,
+      _savingInProgress: false,
+      _unsavedAnnotations: new Set<string>(),
+      _triggerSaving: vi.fn(async () => undefined),
+      _onDelete: vi.fn((_ids: string[]) => undefined),
+    };
+    const reader = {
+      itemID: attachment.id,
+      _item: attachment,
+      _iframeWindow: makeWindow(),
+      _internalReader: {
+        _state: { readOnly: false },
+        _annotationManager: manager,
+        setReadOnly: vi.fn(),
+      },
+    } as unknown as ReaderLike;
+    enableImmediateAnnotationSaving(reader);
+
+    manager._onDelete(["UNSAVED1"]);
+    await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
+
+    expect(Zotero.DB.valueQueryAsync).toHaveBeenCalledOnce();
+    expect(getAsync).not.toHaveBeenCalled();
+  });
+
+  it("waits for erased annotation items to disappear without awaiting the host promise", async () => {
+    vi.useFakeTimers();
+    try {
+      const attachment = { id: 7, libraryID: 1 };
+      const annotation = { id: 70, key: "ERASED1", libraryID: 1, parentID: attachment.id };
+      let annotationExists = true;
+      const thenAccess = vi.fn(() => {
+        throw new Error("Permission denied to access cross-compartment promise");
+      });
+      const opaqueResult = {};
+      Object.defineProperty(opaqueResult, "then", { get: thenAccess });
+      Object.assign(Zotero, {
+        DB: { valueQueryAsync: vi.fn(async () => annotation.id) },
+        Items: {
+          // Simulate a valid database annotation that another code path has
+          // unloaded from the synchronous item cache.
+          get: vi.fn(() => false),
+          getAsync: vi.fn(async (id: number) =>
+            id === annotation.id && annotationExists ? annotation : false,
+          ),
+          getByLibraryAndKey: vi.fn(() => false),
+        },
+      });
+      const originalDelete = vi.fn((_ids: string[]) => opaqueResult);
+      const manager = {
         _skipAnnotationSavingDebounce: false,
         _savingInProgress: false,
         _unsavedAnnotations: new Set<string>(),
         _triggerSaving: vi.fn(async () => undefined),
-      },
-      setReadOnly: vi.fn(),
-      _onDeleteAnnotations: vi.fn((_ids: string[]) =>
-        Promise.reject(new Error("erase transaction failed")),
-      ),
-    };
-    const reader = {
-      itemID: 8,
-      _iframeWindow: makeWindow(),
-      _internalReader: internal,
-    } as unknown as ReaderLike;
-    enableImmediateAnnotationSaving(reader);
-    internal._onDeleteAnnotations(["erased-ink"]);
-
-    await expect(flushReaderAnnotations(reader)).rejects.toThrow(/failed to save an erased/);
-  });
-
-  it("times out a stalled erase transaction instead of hanging forever", async () => {
-    vi.useFakeTimers();
-    try {
+        _onDelete: originalDelete,
+      };
       const internal = {
         _state: { readOnly: false },
-        _annotationManager: {
-          _skipAnnotationSavingDebounce: false,
-          _savingInProgress: false,
-          _unsavedAnnotations: new Set<string>(),
-          _triggerSaving: vi.fn(async () => undefined),
-        },
+        _annotationManager: manager,
         setReadOnly: vi.fn(),
-        _onDeleteAnnotations: vi.fn((_ids: string[]) => new Promise<void>(() => undefined)),
       };
       const reader = {
-        itemID: 18,
+        itemID: attachment.id,
+        _item: attachment,
         _iframeWindow: makeWindow(),
         _internalReader: internal,
       } as unknown as ReaderLike;
       enableImmediateAnnotationSaving(reader);
-      internal._onDeleteAnnotations(["stalled-erase"]);
+
+      expect(manager._onDelete([annotation.key])).toBe(opaqueResult);
+
+      let flushed = false;
+      const flush = flushReaderAnnotations(reader).then(() => {
+        flushed = true;
+      });
+      await Promise.resolve();
+      expect(flushed).toBe(false);
+      annotationExists = false;
+      await vi.advanceTimersByTimeAsync(25);
+      await flush;
+      expect(flushed).toBe(true);
+      expect(thenAccess).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out when an erased annotation item never disappears", async () => {
+    vi.useFakeTimers();
+    try {
+      const attachment = { id: 18, libraryID: 1 };
+      const annotation = { id: 180, key: "STALLED1", libraryID: 1, parentID: attachment.id };
+      Object.assign(Zotero, {
+        DB: { valueQueryAsync: vi.fn(async () => annotation.id) },
+        Items: {
+          get: vi.fn((id: number) => (id === annotation.id ? annotation : false)),
+          getAsync: vi.fn(async (id: number) => (id === annotation.id ? annotation : false)),
+          getByLibraryAndKey: vi.fn((_libraryID: number, key: string) =>
+            key === annotation.key ? annotation : false,
+          ),
+        },
+      });
+      const originalDelete = vi.fn((_ids: string[]) => undefined);
+      const manager = {
+        _skipAnnotationSavingDebounce: false,
+        _savingInProgress: false,
+        _unsavedAnnotations: new Set<string>(),
+        _triggerSaving: vi.fn(async () => undefined),
+        _onDelete: originalDelete,
+      };
+      const internal = {
+        _state: { readOnly: false },
+        _annotationManager: manager,
+        setReadOnly: vi.fn(),
+      };
+      const reader = {
+        itemID: attachment.id,
+        _item: attachment,
+        _iframeWindow: makeWindow(),
+        _internalReader: internal,
+      } as unknown as ReaderLike;
+      enableImmediateAnnotationSaving(reader);
+      manager._onDelete([annotation.key]);
 
       const flush = flushReaderAnnotations(reader);
       const assertion = expect(flush).rejects.toThrow(/Timed out while waiting.*erased/);
@@ -450,21 +704,34 @@ describe("Zotero 9 reader compatibility", () => {
     }
   });
 
-  it("rebinds save hooks without leaving nested wrappers after a reader reload", () => {
+  it("rebinds save hooks and resets stale deletion state after manager replacement", async () => {
     const firstManager = {
       _skipAnnotationSavingDebounce: false,
       _savingInProgress: false,
       _unsavedAnnotations: new Set<string>(),
       _triggerSaving: vi.fn(async () => undefined),
+      _onDelete: vi.fn((_ids: string[]) => {
+        throw new Error("old manager deletion failure");
+      }),
     };
-    const secondManager = { ...firstManager, _unsavedAnnotations: new Set<string>() };
+    const secondManager = {
+      _skipAnnotationSavingDebounce: false,
+      _savingInProgress: false,
+      _unsavedAnnotations: new Set<string>(),
+      _triggerSaving: vi.fn(async () => undefined),
+      _onDelete: vi.fn((_ids: string[]) => undefined),
+    };
     const originalSetReadOnly = vi.fn();
-    const originalDelete = vi.fn(async (_ids: string[]) => undefined);
-    const internal = {
+    const originalFirstDelete = firstManager._onDelete;
+    const originalSecondDelete = secondManager._onDelete;
+    const internal: {
+      _state: { readOnly: boolean };
+      _annotationManager: any;
+      setReadOnly: ReturnType<typeof vi.fn>;
+    } = {
       _state: { readOnly: false },
       _annotationManager: firstManager,
       setReadOnly: originalSetReadOnly,
-      _onDeleteAnnotations: originalDelete,
     };
     const reader = {
       itemID: 9,
@@ -473,14 +740,71 @@ describe("Zotero 9 reader compatibility", () => {
     } as unknown as ReaderLike;
 
     enableImmediateAnnotationSaving(reader);
+    firstManager._onDelete([]);
+    await expect(flushReaderAnnotations(reader)).rejects.toThrow(/failed to save an erased/);
     internal._annotationManager = secondManager;
     enableImmediateAnnotationSaving(reader);
+    await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
     unregisterReaderHooks();
 
     expect(internal.setReadOnly).toBe(originalSetReadOnly);
-    expect(internal._onDeleteAnnotations).toBe(originalDelete);
+    expect(firstManager._onDelete).toBe(originalFirstDelete);
+    expect(secondManager._onDelete).toBe(originalSecondDelete);
     expect(firstManager._skipAnnotationSavingDebounce).toBe(false);
     expect(secondManager._skipAnnotationSavingDebounce).toBe(false);
+  });
+
+  it("drops a previous manager's pending deletion barrier after manager replacement", async () => {
+    vi.useFakeTimers();
+    try {
+      const attachment = { id: 19, libraryID: 1 };
+      const annotation = { id: 190, key: "OLDMGR01", libraryID: 1, parentID: attachment.id };
+      Object.assign(Zotero, {
+        DB: { valueQueryAsync: vi.fn(async () => annotation.id) },
+        Items: {
+          get: vi.fn((id: number) => (id === annotation.id ? annotation : false)),
+          getAsync: vi.fn(async (id: number) => (id === annotation.id ? annotation : false)),
+          getByLibraryAndKey: vi.fn((_libraryID: number, key: string) =>
+            key === annotation.key ? annotation : false,
+          ),
+        },
+      });
+      const firstDelete = vi.fn((_ids: string[]) => undefined);
+      const secondDelete = vi.fn((_ids: string[]) => undefined);
+      const firstManager = {
+        _skipAnnotationSavingDebounce: false,
+        _savingInProgress: false,
+        _unsavedAnnotations: new Set<string>(),
+        _triggerSaving: vi.fn(async () => undefined),
+        _onDelete: firstDelete,
+      };
+      const secondManager = {
+        ...firstManager,
+        _unsavedAnnotations: new Set<string>(),
+        _onDelete: secondDelete,
+      };
+      const internal: { _state: { readOnly: boolean }; _annotationManager: any } = {
+        _state: { readOnly: false },
+        _annotationManager: firstManager,
+      };
+      const reader = {
+        itemID: attachment.id,
+        _item: attachment,
+        _iframeWindow: makeWindow(),
+        _internalReader: internal,
+      } as unknown as ReaderLike;
+
+      enableImmediateAnnotationSaving(reader);
+      firstManager._onDelete([annotation.key]);
+      internal._annotationManager = secondManager;
+      enableImmediateAnnotationSaving(reader);
+
+      await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
+      expect(firstManager._onDelete).toBe(firstDelete);
+      await vi.advanceTimersByTimeAsync(25);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("flushes unsaved ink before closing a standalone notes window", async () => {

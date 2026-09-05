@@ -245,8 +245,8 @@ export class StickyNotesPlugin {
           waitForPending: () => this.noteService.waitForPendingFileOperations(item),
         },
         (error) => {
-          if (this.data.initialized) alertError(reader._window, "pageFailed", error);
-          else this.logError(error);
+          this.logError(error);
+          if (this.data.initialized) alertError(reader._window, "closeSaveFailed", error);
         },
       );
       const button = this.makeToolbarButton(doc, message("addPage"), "+▤", () => {
@@ -386,7 +386,10 @@ export class StickyNotesPlugin {
       }
       try {
         await this.noteService.createForAnnotation(source, annotation);
-        if (this.data.initialized) showStatus("created");
+        if (this.data.initialized) {
+          showStatus("created");
+          await this.openLinkedNote(annotation, pending.reader);
+        }
       } catch (error) {
         this.logError(error);
         if (this.data.initialized) alertError(pending.reader._window, "createFailed", error);
@@ -425,8 +428,8 @@ export class StickyNotesPlugin {
           waitForPending: () => this.noteService.waitForPendingFileOperations(resolution.item),
         },
         (error) => {
-          if (this.data.initialized) alertError(noteReader._window, "pageFailed", error);
-          else this.logError(error);
+          this.logError(error);
+          if (this.data.initialized) alertError(noteReader._window, "closeSaveFailed", error);
         },
       );
     } catch (error) {

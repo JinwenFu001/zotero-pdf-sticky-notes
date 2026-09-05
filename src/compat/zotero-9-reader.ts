@@ -13,6 +13,12 @@ interface PointerBinding {
   unload: () => void;
 }
 
+interface PointerStart {
+  x: number;
+  y: number;
+  annotationID?: string;
+}
+
 interface PendingWorkBarrier {
   hasPending: () => boolean;
   waitForPending: () => Promise<void>;
@@ -72,6 +78,7 @@ interface ImmediateSaveState {
   reader: ReaderLike;
   internal: any;
   manager: any;
+  active: boolean;
   previousValue: boolean | undefined;
   saveFailureDetected: boolean;
   deleteFailureDetected: boolean;
@@ -79,8 +86,8 @@ interface ImmediateSaveState {
   pendingDeletionTransactions: Set<Promise<void>>;
   originalSetReadOnly?: (...args: any[]) => any;
   wrappedSetReadOnly?: (...args: any[]) => any;
-  originalOnDeleteAnnotations?: (...args: any[]) => any;
-  wrappedOnDeleteAnnotations?: (...args: any[]) => any;
+  originalManagerOnDelete?: (...args: any[]) => any;
+  wrappedManagerOnDelete?: (...args: any[]) => any;
 }
 
 interface ReaderOpenMonitor {
@@ -237,21 +244,39 @@ function annotationByKey(reader: ReaderLike, annotationID: string): ZoteroItemLi
     : undefined;
 }
 
-function selectedAnnotationAtPointer(
-  reader: ReaderLike,
-  view: any,
-  event: PointerEvent,
-): ZoteroItemLike | undefined {
-  const position = view.pointerEventToPosition?.(event);
-  if (!position) return undefined;
-  const selectable = view.getSelectableAnnotations?.(position) ?? [];
-  const selectedIDs = getInternalReader(reader)?._state?.selectedAnnotationIDs ?? [];
-  if (selectedIDs.length !== 1) return undefined;
-  const selectedID = selectedIDs[0];
-  if (!selectable.some((annotation: { id?: string }) => annotation.id === selectedID)) {
-    return undefined;
+function nodeAnnotationID(node: unknown): string | undefined {
+  try {
+    const element = node as {
+      dataset?: { annotationId?: unknown };
+      getAttribute?: (name: string) => unknown;
+      closest?: (selector: string) => unknown;
+    };
+    const value = element.dataset?.annotationId ?? element.getAttribute?.("data-annotation-id");
+    if (value !== undefined && value !== null && String(value)) return String(value);
+
+    const closest = element.closest?.("[data-annotation-id]");
+    if (closest && closest !== node) return nodeAnnotationID(closest);
+  } catch {
+    // Some nodes in the composed path are cross-compartment wrappers. Keep
+    // looking for Zotero's exact annotation marker.
   }
-  return annotationByKey(reader, selectedID);
+  return undefined;
+}
+
+function annotationIDFromEventPath(event: Event): string | undefined {
+  let path: unknown[] = [];
+  try {
+    path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  } catch {
+    // Fall through to the event target, which is available on older Gecko
+    // event wrappers even when composedPath() is not callable.
+  }
+  if (!path.length && event.target) path = [event.target];
+  for (const node of path) {
+    const annotationID = nodeAnnotationID(node);
+    if (annotationID) return annotationID;
+  }
+  return undefined;
 }
 
 function removePointerBinding(binding: PointerBinding): void {
@@ -356,13 +381,17 @@ async function bindStickyActivationToView(
     pointerBindings.splice(pointerBindings.indexOf(existing), 1);
   }
 
-  let start: { x: number; y: number } | undefined;
+  let start: PointerStart | undefined;
   let lastActivation = "";
   let lastActivationTime = 0;
   const pointerDown = (event: Event) => {
     const pointer = event as PointerEvent;
     if (pointer.button !== 0) return;
-    start = { x: pointer.clientX, y: pointer.clientY };
+    start = {
+      x: pointer.clientX,
+      y: pointer.clientY,
+      annotationID: annotationIDFromEventPath(event),
+    };
   };
   const pointerUp = (event: Event) => {
     const pointer = event as PointerEvent;
@@ -371,11 +400,13 @@ async function bindStickyActivationToView(
       start = undefined;
       return;
     }
+    const completed = start;
     start = undefined;
+    if (!completed.annotationID) return;
 
     const activateIfMatched = async () => {
       if (!isCurrentHookSession(session)) return;
-      const annotation = selectedAnnotationAtPointer(reader, view, pointer);
+      const annotation = annotationByKey(reader, completed.annotationID as string);
       if (!annotation) return;
       await Promise.all([
         annotation.loadDataType?.("relations"),
@@ -681,21 +712,19 @@ export function enableImmediateAnnotationSaving(reader: ReaderLike): void {
     }
     if (state) {
       restoreImmediateSaveBindings(state);
-      state.internal = internal;
-      state.manager = manager;
-      state.previousValue = manager._skipAnnotationSavingDebounce;
-    } else {
-      state = {
-        reader,
-        internal,
-        manager,
-        previousValue: manager._skipAnnotationSavingDebounce,
-        saveFailureDetected: false,
-        deleteFailureDetected: false,
-        pendingDeletionTransactions: new Set(),
-      };
-      immediateSaveStates.set(reader, state);
+      immediateSaveStates.delete(reader);
     }
+    state = {
+      reader,
+      internal,
+      manager,
+      active: true,
+      previousValue: manager._skipAnnotationSavingDebounce,
+      saveFailureDetected: false,
+      deleteFailureDetected: false,
+      pendingDeletionTransactions: new Set(),
+    };
+    immediateSaveStates.set(reader, state);
 
     try {
       const item = reader._item ?? (Zotero.Items.get(reader.itemID) as ZoteroItemLike | false);
@@ -730,29 +759,50 @@ export function enableImmediateAnnotationSaving(reader: ReaderLike): void {
       internal.setReadOnly = state.wrappedSetReadOnly;
     }
 
-    if (typeof internal._onDeleteAnnotations === "function") {
-      state.originalOnDeleteAnnotations = internal._onDeleteAnnotations;
-      const wrappedOnDeleteAnnotations = function (this: any, ...args: any[]) {
+    if (typeof manager._onDelete === "function") {
+      // Zotero 9.0.6 calls AnnotationManager._onDelete([]) for every ordinary
+      // annotation save. Hook this reader-realm dispatcher, whose return value
+      // is intentionally ignored, rather than the chrome callback stored on
+      // internal._onDeleteAnnotations. The latter returns a cross-compartment
+      // Promise that the reader cannot safely await or assimilate.
+      state.originalManagerOnDelete = manager._onDelete;
+      const wrappedManagerOnDelete = function (this: any, ...args: any[]) {
+        const keys = Array.isArray(args[0])
+          ? Array.from(args[0] as unknown[], (key) => String(key))
+          : [];
+        // Start authoritative DB lookups before dispatching the erase so an
+        // existing annotation cannot disappear between capture and deletion.
+        const itemIDs = keys.length ? deletionItemIDs(reader, keys) : undefined;
         let result: any;
+        let dispatched = false;
         try {
-          result = state.originalOnDeleteAnnotations?.apply(this, args);
-          const tracked = Promise.resolve(result).then(
-            () => undefined,
-            (error) => {
-              state.deleteFailureDetected = true;
-              state.deleteFailure = error;
-            },
-          );
-          state.pendingDeletionTransactions.add(tracked);
-          void tracked.finally(() => state.pendingDeletionTransactions.delete(tracked));
+          result = state.originalManagerOnDelete?.apply(this, args);
+          dispatched = true;
         } catch (error) {
           state.deleteFailureDetected = true;
           state.deleteFailure = error;
         }
+        if (dispatched && itemIDs) {
+          const tracked = itemIDs
+            .then((ids) => waitForDeletedItems(state, ids))
+            .then(
+              () => undefined,
+              (error) => {
+                state.deleteFailureDetected = true;
+                state.deleteFailure = error;
+              },
+            );
+          state.pendingDeletionTransactions.add(tracked);
+          void tracked.finally(() => state.pendingDeletionTransactions.delete(tracked));
+        } else if (itemIDs) {
+          // The dispatch failure is already latched; consume a concurrently
+          // started lookup failure without replacing the more direct cause.
+          void itemIDs.catch(logError);
+        }
         return result;
       };
-      state.wrappedOnDeleteAnnotations = exportIntoReader(reader, wrappedOnDeleteAnnotations);
-      internal._onDeleteAnnotations = state.wrappedOnDeleteAnnotations;
+      state.wrappedManagerOnDelete = exportIntoReader(reader, wrappedManagerOnDelete);
+      manager._onDelete = state.wrappedManagerOnDelete;
     }
 
     manager._skipAnnotationSavingDebounce = true;
@@ -779,6 +829,42 @@ function readerHasPendingDeletions(reader: ReaderLike): boolean {
   return Boolean(immediateSaveStates.get(reader)?.pendingDeletionTransactions.size);
 }
 
+async function deletionItemIDs(reader: ReaderLike, keys: string[]): Promise<number[]> {
+  const attachment =
+    reader._item ?? (Zotero.Items.get(reader.itemID) as ZoteroItemLike | false | undefined);
+  if (!attachment) throw new Error("The notes attachment is unavailable while saving erased ink");
+
+  const ids = await Promise.all(
+    keys.map((key) =>
+      Zotero.DB.valueQueryAsync(
+        "SELECT I.itemID FROM items I JOIN itemAnnotations IA USING (itemID) " +
+          "WHERE I.libraryID=? AND I.key=? AND IA.parentItemID=?",
+        [attachment.libraryID, key, reader.itemID],
+        { noCache: true },
+      ),
+    ),
+  );
+  // A newly drawn annotation can be completely erased before its first save.
+  // In that case there is no database row whose disappearance needs waiting for.
+  const itemIDs: number[] = [];
+  for (const value of ids) {
+    if (value === false || value === null || value === undefined) continue;
+    const itemID = Number(value);
+    if (Number.isInteger(itemID) && itemID > 0) itemIDs.push(itemID);
+  }
+  return [...new Set(itemIDs)];
+}
+
+async function waitForDeletedItems(state: ImmediateSaveState, itemIDs: number[]): Promise<void> {
+  while (state.active) {
+    const remaining = await Promise.all(
+      itemIDs.map((itemID) => (Zotero.Items.getAsync as any)(itemID, { noCache: true })),
+    );
+    if (remaining.every((item) => !item)) return;
+    await delay(25);
+  }
+}
+
 async function waitForReaderDeletionTransactions(reader: ReaderLike): Promise<void> {
   const state = immediateSaveStates.get(reader);
   if (!state) return;
@@ -789,6 +875,7 @@ async function waitForReaderDeletionTransactions(reader: ReaderLike): Promise<vo
       "Timed out while waiting for Zotero to save an erased handwritten annotation",
     );
   }
+  if (!state.active || immediateSaveStates.get(reader) !== state) return;
   if (state.deleteFailureDetected) {
     throw new Error("Zotero failed to save an erased handwritten annotation", {
       cause: state.deleteFailure,
@@ -797,6 +884,8 @@ async function waitForReaderDeletionTransactions(reader: ReaderLike): Promise<vo
 }
 
 function restoreImmediateSaveBindings(state: ImmediateSaveState): void {
+  state.active = false;
+  state.pendingDeletionTransactions.clear();
   try {
     state.manager._skipAnnotationSavingDebounce = state.previousValue;
   } catch (error) {
@@ -815,19 +904,19 @@ function restoreImmediateSaveBindings(state: ImmediateSaveState): void {
   }
   try {
     if (
-      state.wrappedOnDeleteAnnotations &&
-      state.originalOnDeleteAnnotations &&
-      state.internal._onDeleteAnnotations === state.wrappedOnDeleteAnnotations
+      state.wrappedManagerOnDelete &&
+      state.originalManagerOnDelete &&
+      state.manager._onDelete === state.wrappedManagerOnDelete
     ) {
-      state.internal._onDeleteAnnotations = state.originalOnDeleteAnnotations;
+      state.manager._onDelete = state.originalManagerOnDelete;
     }
   } catch (error) {
     logError(error);
   }
   state.originalSetReadOnly = undefined;
   state.wrappedSetReadOnly = undefined;
-  state.originalOnDeleteAnnotations = undefined;
-  state.wrappedOnDeleteAnnotations = undefined;
+  state.originalManagerOnDelete = undefined;
+  state.wrappedManagerOnDelete = undefined;
 }
 
 function removeImmediateSaveState(state: ImmediateSaveState): void {
@@ -1196,8 +1285,9 @@ export async function reloadReaders(
         ),
       ),
     );
-    // reload() can replace the annotation manager. Reapply the immediate-save
-    // setting explicitly instead of relying on a toolbar re-render side effect.
+    // Reapply explicitly instead of relying on a toolbar re-render side
+    // effect; this also rebinds if a future host reinitialization replaces the
+    // annotation manager.
     enableImmediateAnnotationSaving(reader);
   }
   const activeInternal = activeReader ? getInternalReader(activeReader) : undefined;
