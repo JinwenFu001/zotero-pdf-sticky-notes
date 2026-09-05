@@ -97,6 +97,7 @@ for (const requiredRuntimeMarker of [
   "exportFunction",
   "in_conflict",
   "failed to save an erased handwritten annotation",
+  "The Zotero reader annotation removal API is unavailable",
   "PDF worker serialization is unavailable",
 ]) {
   if (!bundleText.includes(requiredRuntimeMarker)) {

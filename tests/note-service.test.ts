@@ -335,6 +335,7 @@ describe("paired sticky-note deletion", () => {
       const commits = transactionCallbacks.commit.splice(0);
       transactionCallbacks.rollback = [];
       for (const commit of commits) await commit();
+      operationOrder.push("commit");
       transactionCallbacks = undefined;
     });
     const unsavedAnnotations = new Set(["fresh-ink"]);
@@ -359,10 +360,39 @@ describe("paired sticky-note deletion", () => {
         unfreeze: vi.fn(),
       },
     } as unknown as ReaderLike;
+    const sourceWindowA = new EventTarget() as unknown as Window & { closed: boolean };
+    sourceWindowA.closed = false;
+    const sourceWindowB = new EventTarget() as unknown as Window & { closed: boolean };
+    sourceWindowB.closed = false;
+    let finishSourceReaderInitialization!: () => void;
+    const sourceReaderInitialization = new Promise<void>((resolve) => {
+      finishSourceReaderInitialization = resolve;
+    });
+    const sourceReaderA = {
+      itemID: source.id,
+      _window: sourceWindowA,
+      _internalReader: {},
+      _initPromise: sourceReaderInitialization,
+      annotationItemIDs: [annotation.id, 99],
+      unsetAnnotations: vi.fn(async () => undefined),
+    } as unknown as ReaderLike;
+    const sourceReaderB = {
+      itemID: source.id,
+      _window: sourceWindowB,
+      _internalReader: {},
+      _initPromise: Promise.resolve(),
+      annotationItemIDs: [annotation.id, 99],
+      unsetAnnotations: vi.fn(async () => {
+        throw new Error("targeted unset failed");
+      }),
+    } as unknown as ReaderLike;
     vi.stubGlobal("Zotero", {
       version: "9.0.6",
       logError: vi.fn(),
-      Reader: { _readers: [noteReader], open: vi.fn(async () => undefined) },
+      Reader: {
+        _readers: [noteReader, sourceReaderA, sourceReaderB],
+        open: vi.fn(async () => undefined),
+      },
       Items: {
         getAsync: vi.fn(async (id: number) => byID.get(id) ?? false),
         getByLibraryAndKeyAsync: vi.fn(
@@ -382,20 +412,33 @@ describe("paired sticky-note deletion", () => {
     initializeReaderHooks();
 
     const service = new NoteService();
-    await service.deleteForAnnotation(annotation, note);
+    const deletion = service.deleteForAnnotation(annotation, note);
+    await vi.waitFor(() => expect(operationOrder).toContain("commit"));
+    expect(sourceReaderA.unsetAnnotations).not.toHaveBeenCalled();
+    finishSourceReaderInitialization();
+    await deletion;
 
     expect(executeTransaction).toHaveBeenCalledOnce();
     expect(annotation.erase).toHaveBeenCalledOnce();
     expect(trash).toHaveBeenCalledWith(note.id);
-    expect(operationOrder).toEqual(["flush", "erase", "trash"]);
+    expect(operationOrder).toEqual(["flush", "erase", "trash", "commit"]);
     expect(note.reload).not.toHaveBeenCalled();
     expect(source.reload).not.toHaveBeenCalled();
     expect(parent.reload).not.toHaveBeenCalled();
+    expect(sourceReaderA.unsetAnnotations).toHaveBeenCalledWith([annotation.key]);
+    expect(sourceReaderA.annotationItemIDs).toEqual([99]);
+    expect(sourceReaderB.unsetAnnotations).toHaveBeenCalledWith([annotation.key]);
+    expect(sourceReaderB.annotationItemIDs).toEqual([annotation.id, 99]);
+
+    vi.mocked(sourceReaderA.unsetAnnotations!).mockClear();
+    vi.mocked(sourceReaderB.unsetAnnotations!).mockClear();
 
     trash.mockRejectedValueOnce(new Error("trash failed"));
     await expect(service.deleteForAnnotation(annotation, note)).rejects.toThrow("trash failed");
     expect(source.reload).toHaveBeenCalledWith(["primaryData", "childItems"], true);
     expect(parent.reload).toHaveBeenCalledWith(["primaryData", "childItems"], true);
+    expect(sourceReaderA.unsetAnnotations).not.toHaveBeenCalled();
+    expect(sourceReaderB.unsetAnnotations).not.toHaveBeenCalled();
 
     const eraseCallsBeforeFlushFailure = vi.mocked(annotation.erase!).mock.calls.length;
     const trashCallsBeforeFlushFailure = trash.mock.calls.length;
@@ -405,5 +448,7 @@ describe("paired sticky-note deletion", () => {
     await expect(service.deleteForAnnotation(annotation, note)).rejects.toThrow("flush failed");
     expect(annotation.erase).toHaveBeenCalledTimes(eraseCallsBeforeFlushFailure);
     expect(trash).toHaveBeenCalledTimes(trashCallsBeforeFlushFailure);
+    expect(sourceReaderA.unsetAnnotations).not.toHaveBeenCalled();
+    expect(sourceReaderB.unsetAnnotations).not.toHaveBeenCalled();
   });
 });

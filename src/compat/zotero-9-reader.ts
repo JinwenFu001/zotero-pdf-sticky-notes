@@ -1164,6 +1164,69 @@ export function readerInstancesForItem(itemID: number): ReaderLike[] {
   });
 }
 
+/**
+ * Reconcile a committed annotation deletion with every open source reader.
+ *
+ * Zotero 9.0.6 delivers the notes attachment's modify notification before the
+ * annotation's delete notification. The modify handler refreshes
+ * annotationItemIDs from the database after the row is gone, so the later
+ * delete handler no longer finds the key to remove from the rendered PDF. A
+ * targeted unset preserves the source reader's page, zoom, and scroll state.
+ * This function intentionally never throws because the database deletion has
+ * already committed.
+ */
+export async function reconcileDeletedAnnotationInReaders(
+  sourceItemID: number,
+  annotationID: number,
+  annotationKey: string,
+): Promise<void> {
+  const safelyLog = (error: unknown): void => {
+    try {
+      logError(error);
+    } catch {
+      // UI reconciliation must not turn a committed database deletion into a
+      // reported operation failure, even if host logging is unavailable.
+    }
+  };
+
+  let readers: ReaderLike[];
+  try {
+    readers = readerInstancesForItem(sourceItemID);
+  } catch (error) {
+    safelyLog(error);
+    return;
+  }
+
+  await Promise.allSettled(
+    readers.map(async (reader) => {
+      try {
+        await waitForReader(reader);
+        if (!readerInstancesForItem(sourceItemID).includes(reader)) return;
+        if (typeof reader.unsetAnnotations !== "function") {
+          throw new Error("The Zotero reader annotation removal API is unavailable");
+        }
+        await reader.unsetAnnotations([annotationKey]);
+      } catch (error) {
+        safelyLog(error);
+        return;
+      }
+
+      // Only retire the numeric ID after the rendered annotation was removed.
+      // Keeping it on failure allows a later native delete notification to
+      // retry instead of hiding the annotation from Zotero's own handler.
+      try {
+        if (Array.isArray(reader.annotationItemIDs)) {
+          reader.annotationItemIDs = reader.annotationItemIDs.filter(
+            (itemID) => itemID !== annotationID,
+          );
+        }
+      } catch (error) {
+        safelyLog(error);
+      }
+    }),
+  );
+}
+
 export async function withReaderOpeningPaused<T>(
   itemID: number,
   task: () => Promise<T>,

@@ -52,6 +52,7 @@ export interface ReaderLike {
   _initPromise?: Promise<unknown>;
   focus?: () => Promise<void> | void;
   navigate?: (location: Record<string, unknown>) => Promise<void> | void;
+  unsetAnnotations?: (annotationKeys: string[]) => Promise<void> | void;
   reload?: () => Promise<void>;
 }
 

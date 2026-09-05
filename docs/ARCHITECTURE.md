@@ -160,6 +160,7 @@ Zotero 原生 Delete/Backspace 路径不由插件拦截：它删除便签，但�
 → 进入该 PDF 的文件队列，阻止新 reader open 并等待既有 open/下载屏障
 → freeze 并 flush 每个已打开的笔记 reader
 → 同一 Zotero 数据库事务内 annotation.erase() + Zotero.Items.trash(noteID)
+→ 提交成功后按 annotation key 清除所有已打开原文 reader 中的便签，并过滤其 ID
 → unfreeze 并显示结果
 ```
 
@@ -174,7 +175,15 @@ Zotero 原生 Delete/Backspace 路径不由插件拦截：它删除便签，但�
 relation，并由 note service 重载 source/父条目的 `childItems` 缓存。如果数据库已提交，
 后续 host callback 异常只记录日志；该删除仍视为成功，不能重建已删除的 relation，也不能
 向用户误报“删除失败”。
-真实 Zotero 回收站、窗口和同步行为仍为 `NOT RUN`。
+
+Zotero 9.0.6 的 notifier 先派发笔记附件 `modify`，后派发 annotation `delete`。前者会在
+数据库行删除后重新计算 `Reader.annotationItemIDs`，导致后者找不到 ID 而不调用
+`unsetAnnotations()`，页面因此留下已不存在于数据库的残影。兼容层在事务成功后直接对
+每个原文 reader 初始化完成，再调用 `unsetAnnotations([annotationKey])`；只有定点清除成功
+才从 ID 数组过滤该条目。定点清除失败时保留 ID，让稍后到达的 Zotero 原生 delete 通知仍
+能重试，而不是用无法清理 reader 内存批注的 PDF `reload()` 制造假成功。该步骤是提交后的
+UI reconciliation，永不重建数据，也不把视图清理失败误报成数据库删除失败。真实 Zotero
+0.1.4 行为仍为 `NOT RUN`。
 
 ## 本地文件可用性
 
@@ -311,8 +320,13 @@ pending/failure 状态、恢复 descriptor 并重新绑定；普通 page reload 
 
 桌面 XPI 不会在 Zotero iOS/iPadOS 客户端运行。普通 stored-file 笔记 PDF 和 Zotero 原生
 ink annotation 属于可同步的数据形态，因此设计目标包括“Mac 创建、iPad 从同一文献的附件
-列表打开并书写、Mac 再打开”的伴随流程；真实设备往返仍为 `NOT RUN`。iPad 上的便签单击
-跳转和 PDF 加页需要 iOS 客户端原生支持，不由本兼容层提供。
+列表打开并书写、Mac 再打开”的伴随流程；真实设备往返仍为 `NOT RUN`。
+
+`dc:relation` 可以同步到 iOS item model，但当前 iOS reader 暴露给 PDF 批注的模型和动作
+不读取该关系；批注 comment 的 HTML 转换也不生成链接。因此同步关系本身不能让便签图标
+获得单击、双击或长按动作。iOS 已支持 `zotero://open-pdf/...`，但要从原文位置触发它，
+只能由 Zotero iOS 上游增加关系动作，或另行实验在原文文件中嵌入标准 PDF Link annotation。
+后者会改变原文、同步和删除生命周期，不属于当前插件实现。
 
 ## 兼容边界
 
@@ -333,7 +347,7 @@ ink annotation 属于可同步的数据形态，因此设计目标包括“Mac �
 - Reader `_readers`
 - `Zotero.Reader.open`（启动期 active-open 监控与按 item 加页屏障）
 - `Zotero.PDFWorker._enqueue`（与原生 PDF 文件变换共用写入队列）
-- `freeze` / `unfreeze` / `reload` / `navigate`
+- `freeze` / `unfreeze` / `reload` / `navigate` / `unsetAnnotations`
 - reader `_window`
 - 主窗口 `Zotero_Tabs.close` / `unload`
 - sync runner `delayIndefinite`

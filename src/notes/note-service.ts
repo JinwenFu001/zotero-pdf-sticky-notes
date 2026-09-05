@@ -6,6 +6,7 @@ import {
   freezeReaders,
   openReadersForItem,
   readerInstancesForItem,
+  reconcileDeletedAnnotationInReaders,
   reloadReaders,
   unfreezeReaders,
   waitForReader,
@@ -449,6 +450,11 @@ export class NoteService {
               }
             }
             await deleteStickyAndTrashNote(freshAnnotation, freshNote);
+            await reconcileDeletedAnnotationInReaders(
+              sourceID,
+              freshAnnotation.id,
+              freshAnnotation.key,
+            );
           } catch (error) {
             const reloads = await Promise.allSettled([
               freshAnnotation.reload?.(["primaryData", "relations", "tags"], true),
