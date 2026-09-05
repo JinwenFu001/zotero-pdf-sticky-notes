@@ -6,18 +6,21 @@
   "description": "Open a dedicated handwritten-notes PDF from a sticky annotation in Zotero's PDF reader.",
   "config": {
     "addonName": "Zotero PDF Sticky Notes",
-    "addonID": "zotero-pdf-sticky-notes@prototype.invalid",
+    "addonID": "zotero-pdf-sticky-notes@jinwenfu001.github.io",
     "addonRef": "zoteropdfstickynotes",
     "addonInstance": "ZoteroPDFStickyNotes",
     "prefsPrefix": "extensions.zotero.zotero-pdf-sticky-notes"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/zotero-pdf-sticky-notes.git"
+    "url": "git+https://github.com/JinwenFu001/zotero-pdf-sticky-notes.git"
   },
-  "author": "Jinwen Fu",
-  "homepage": "https://github.com/OWNER/zotero-pdf-sticky-notes",
-  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/JinwenFu001/zotero-pdf-sticky-notes/issues"
+  },
+  "author": "Jinwen Fu (https://github.com/JinwenFu001)",
+  "homepage": "https://github.com/JinwenFu001/zotero-pdf-sticky-notes",
+  "license": "MIT",
   "engines": {
     "node": ">=24"
   },

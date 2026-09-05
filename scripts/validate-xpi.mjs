@@ -2,7 +2,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
 
-const version = JSON.parse(await readFile("package.json", "utf8")).version;
+const pkg = JSON.parse(await readFile("package.json", "utf8"));
+const version = pkg.version;
 const xpiPath = path.resolve(`dist/zotero-pdf-sticky-notes-${version}.xpi`);
 const archive = await readFile(xpiPath);
 
@@ -50,6 +51,7 @@ const required = [
   "manifest.json",
   "bootstrap.js",
   "content/scripts/zoteropdfstickynotes.js",
+  "LICENSE",
   "licenses/THIRD-PARTY-NOTICES.md",
   "licenses/pdf-lib.txt",
 ];
@@ -66,6 +68,12 @@ if (/__[A-Za-z][A-Za-z0-9]*__/.test(manifestText)) {
 }
 const manifest = JSON.parse(manifestText);
 if (manifest.version !== version) throw new Error("Manifest/package versions differ");
+if (manifest.applications?.zotero?.id !== pkg.config.addonID) {
+  throw new Error("Manifest/package add-on IDs differ");
+}
+if (manifest.homepage_url !== pkg.homepage) {
+  throw new Error("Manifest/package homepages differ");
+}
 if (manifest.applications?.zotero?.strict_min_version !== "9.0.6") {
   throw new Error("Prototype compatibility must remain locked to tested Zotero 9.0.6");
 }

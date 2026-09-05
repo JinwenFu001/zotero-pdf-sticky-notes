@@ -1,4 +1,4 @@
-export const PLUGIN_ID = "zotero-pdf-sticky-notes@prototype.invalid";
+export const PLUGIN_ID = "zotero-pdf-sticky-notes@jinwenfu001.github.io";
 export const PLUGIN_NAME = "Zotero PDF Sticky Notes";
 
 export const RELATION_PREDICATE = "dc:relation";

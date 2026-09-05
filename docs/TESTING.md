@@ -23,7 +23,7 @@
 - Gecko：140.12.0（BuildID 20260609153453）
 - 插件版本：0.1.0
 - XPI：`dist/zotero-pdf-sticky-notes-0.1.0.xpi`
-- XPI SHA-256：`79ef37874c436d2b92e5736e0a43349cdbcaba6cdbc37f93308f724aa6f26d7a`
+- XPI SHA-256：`fcb73c262b734f84826a362d43a001cb0694f491c6945618e21d9795393b4a10`
 - 客户端测试 profile：尚未创建或使用
 - 测试文献库：尚未创建
 - Zotero 数据同步：`NOT RUN`

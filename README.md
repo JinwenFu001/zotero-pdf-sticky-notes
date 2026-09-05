@@ -72,7 +72,7 @@ PDF。
 文献库。
 
 本次本地原型的 SHA-256：
-`79ef37874c436d2b92e5736e0a43349cdbcaba6cdbc37f93308f724aa6f26d7a`。
+`fcb73c262b734f84826a362d43a001cb0694f491c6945618e21d9795393b4a10`。
 
 ## 使用方法
 
@@ -240,29 +240,30 @@ dist/zotero-pdf-sticky-notes-0.1.0.xpi
 - Zotero 9.0.6 的部分存储后端可能无法立即取消下载；插件会优先保证文件安全，底层下载在
   后台结束前，同一附件不能再次打开或加页，停用插件也可能被延迟。
 - 同步、完整导出和插件停用后的读取仍为发布前验证项。
-- 自动更新配置仍含发布占位值，不能用于正式分发。
+- 自动更新地址已指向 GitHub Releases；仓库创建并首次发布前，该地址不会提供更新文件。
 
 ## 隐私
 
 插件不提供遥测，也不连接自有服务器。附件下载和上传仅通过用户已有的 Zotero 同步配置
 完成。
 
-## 发布前待填写
+## 发布配置
 
-- GitHub 用户或组织：`OWNER`
-- 最终仓库 URL
-- 稳定插件 ID；发布后不宜更改
-- 对外作者名称及联系信息
-- 项目许可证和版权声明
-- 首页、问题反馈 URL
-- Release 和 `update.json` 的真实下载地址
+- GitHub 仓库：`JinwenFu001/zotero-pdf-sticky-notes`
+- 稳定插件 ID：`zotero-pdf-sticky-notes@jinwenfu001.github.io`
+- 作者：Jinwen Fu（联系入口为 GitHub profile 和仓库 Issues）
+- 许可证：MIT
+- 自动更新：GitHub Releases 的 `release/update.json`
+
+仍需在正式发布前完成：
+
 - 正式支持的 Zotero 版本范围
 - 实际客户端验证日期和结果
 - 正式 Release XPI 的 SHA-256
 - 最终版本号及 CHANGELOG
 
-当前项目许可证为 `UNLICENSED`。发布前必须选择项目许可证。XPI 已携带 `pdf-lib` 及其传递
-依赖的许可证声明，但这不能代替项目自身许可证。
+项目采用 [MIT License](LICENSE)。XPI 同时携带项目许可证、`pdf-lib` 及其传递依赖的许可证
+声明。
 
 ## 开发依据
 

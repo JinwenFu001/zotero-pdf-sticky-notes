@@ -20,7 +20,7 @@ export default defineConfig({
   updateURL,
   xpiDownloadLink,
   build: {
-    assets: ["addon/**/*.*"],
+    assets: ["addon/**/*.*", "LICENSE"],
     fluent: {
       dts: false,
     },

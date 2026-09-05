@@ -4,6 +4,7 @@ const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url
 const problems = [];
 const repositoryURL = pkg.repository?.url ?? "";
 const homepage = pkg.homepage ?? "";
+const issuesURL = pkg.bugs?.url ?? "";
 const expectedTag = `v${pkg.version}`;
 const pushedTag = process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : undefined;
 
@@ -12,6 +13,9 @@ if (!repositoryURL || /(?:OWNER|REPLACE|example\.invalid)/i.test(repositoryURL))
 }
 if (!homepage || /(?:OWNER|REPLACE|example\.invalid)/i.test(homepage)) {
   problems.push("package.json homepage must point to the real project homepage");
+}
+if (!issuesURL || /(?:OWNER|REPLACE|example\.invalid)/i.test(issuesURL)) {
+  problems.push("package.json bugs.url must point to the real issue tracker");
 }
 if (!pkg.author?.trim()) {
   problems.push("package.json author must be set");
