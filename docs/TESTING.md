@@ -21,10 +21,10 @@
 - Zotero：9.0.6
 - Zotero BuildID：20260707110915
 - Gecko：140.12.0（BuildID 20260609153453）
-- 插件版本：0.1.2
-- XPI：`dist/zotero-pdf-sticky-notes-0.1.2.xpi`
-- XPI SHA-256：`24456b2c5a4af5d645b51217cb09ac66cffb58c177350dfeb83adecd1b5eada7`
-- 客户端测试 profile：`developer`（已执行 0.1.0 和 0.1.1 部分流程）
+- 插件版本：0.1.3
+- XPI：`dist/zotero-pdf-sticky-notes-0.1.3.xpi`
+- XPI SHA-256：`9e869e507d73850b1bbdcf6320957972c27b246687b34b3179fb1c3e314719f0`
+- 客户端测试 profile：`developer`（已执行 0.1.0、0.1.1 和 0.1.2 部分流程）
 - 测试文献库：仅使用 `developer` 数据目录中的测试条目
 - Zotero 数据同步：`NOT RUN`
 - Zotero 文件同步：`NOT RUN`
@@ -38,72 +38,98 @@ interface 不可用。源码复核确认 9.0.6 的接口存在，0.1.1 已改用
 双向关联；从附件列表可打开 PDF 并使用画笔。实际测试同时暴露两个问题：单击便签仍打开
 原生便签界面而不是关联 PDF；关闭笔记窗口时误报“Zotero failed to save an erased
 handwritten annotation”。只读数据库核对显示该次 ink annotation 实际已经保存，因此后者
-是兼容层把普通保存附带的空删除批次误判为失败。0.1.2 改为读取便签 DOM 的精确 ID，并且
-只对真实非空擦除建立条目消失屏障；这两个修复尚未在 Zotero GUI 中复测。
+是兼容层把普通保存附带的空删除批次误判为失败。
+
+0.1.2 在同一 profile 中再次实测：便签、双向关联及空白 PDF 确实创建成功，但首次自动打开
+和之后单击便签均失败，并提示有效 PDF 不可读，底层把跨 realm 的 `Uint8Array` 误报为
+`NaN`。从附件列表可以打开笔记 PDF 并使用画笔，但关闭时提示
+`Permission denied to access property "length"`；根因是插件在 Zotero 原生保存之前枚举了
+受 Gecko 保护的 reader-realm 删除参数。只读数据库可见 ink item，但这不足以证明报错前的
+最后一笔或擦除完整保存。原生删除便签后关联 PDF 保留、下一项编号为 2，符合旧版“默认
+保留 PDF”及活动标题占号的逻辑，不是文件丢失。
+
+0.1.3 在 `IOUtils` 文件边界把字节复制到插件 realm，不再包装或读取 reader-realm 的删除
+参数，改为观察 chrome Reader 的 `annotationItemIDs` 数字 ID 变化来确认擦除持久化；同时
+增加右键确认的成对删除和有效附件最小空缺编号。以上均已自动测试，但尚未在 Zotero GUI
+中复测。
 
 ## 已执行的自动检查
 
-| ID           | 类型        | 覆盖内容                                            | 结果   |
-| ------------ | ----------- | --------------------------------------------------- | ------ |
-| UT-PDF-01    | `AUTOMATED` | 创建一页 A4 空白 PDF                                | `PASS` |
-| UT-PDF-02    | `AUTOMATED` | 追加页面时沿用末页尺寸并保留已有页面内容            | `PASS` |
-| UT-PDF-03    | `AUTOMATED` | 损坏 PDF 被拒绝且不产生输出                         | `PASS` |
-| UT-FILE-01   | `AUTOMATED` | 安全替换在 commit 前保留恢复副本                    | `PASS` |
-| UT-FILE-02   | `AUTOMATED` | 已完成替换可 rollback                               | `PASS` |
-| UT-FILE-03   | `AUTOMATED` | 写后校验失败时恢复原文件                            | `PASS` |
-| UT-FILE-04   | `AUTOMATED` | 自动恢复失败时保留并报告 recovery copy              | `PASS` |
-| UT-FILE-05   | `AUTOMATED` | 拒绝覆盖读取后被并发修改的 PDF                      | `PASS` |
-| UT-FILE-06   | `AUTOMATED` | recovery copy 不可读时进入人工恢复状态              | `PASS` |
-| UT-FILE-07   | `AUTOMATED` | 临时文件清理失败不覆盖已成功的安全替换结果          | `PASS` |
-| UT-FILE-08   | `AUTOMATED` | 原文件恢复验证成功后，清理失败不误报恢复失败        | `PASS` |
-| UT-FILE-09   | `AUTOMATED` | 隔离竞争中不删除被外部再次替换的目标文件            | `PASS` |
-| UT-QUEUE-01  | `AUTOMATED` | 同一附件操作严格串行                                | `PASS` |
-| UT-QUEUE-02  | `AUTOMATED` | 一次失败不阻塞后续操作                              | `PASS` |
-| UT-QUEUE-03  | `AUTOMATED` | 不同附件可独立推进                                  | `PASS` |
-| UT-QUEUE-04  | `AUTOMATED` | 50 个快速连续操作不重叠且结果顺序完整               | `PASS` |
-| UT-QUEUE-05  | `AUTOMATED` | 快速队列中前项失败后后项继续执行                    | `PASS` |
-| UT-QUEUE-06  | `AUTOMATED` | 单附件 idle barrier 会等待随后排入的任务            | `PASS` |
-| UT-QUEUE-07  | `AUTOMATED` | shutdown barrier 等待所有附件队列清空               | `PASS` |
-| UT-REL-01    | `AUTOMATED` | 正确解析同库、同父条目、双向关联                    | `PASS` |
-| UT-REL-02    | `AUTOMATED` | 拒绝缺失或多目标的便签关联                          | `PASS` |
-| UT-REL-03    | `AUTOMATED` | 拒绝跨 library 或跨父条目目标                       | `PASS` |
-| UT-REL-04    | `AUTOMATED` | 要求 stored PDF、插件 marker 和反向关联             | `PASS` |
-| UT-REL-05    | `AUTOMATED` | 区分已删除的目标附件                                | `PASS` |
-| UT-REL-06    | `AUTOMATED` | 在单一数据库事务中写入双向关联                      | `PASS` |
-| UT-REL-07    | `AUTOMATED` | 写入前拒绝跨 library 关联                           | `PASS` |
-| UT-REL-08    | `AUTOMATED` | 损坏的 Zotero item URI 被归类为无效关联             | `PASS` |
-| UT-REL-09    | `AUTOMATED` | 关联事务回滚后恢复关系/tag 缓存及 tag dirty 状态    | `PASS` |
-| UT-COMPAT-01 | `AUTOMATED` | 检测只读 reader 静默拒绝 note tool                  | `PASS` |
-| UT-COMPAT-02 | `AUTOMATED` | 放置操作捕获本次原生便签的精确 key                  | `PASS` |
-| UT-COMPAT-03 | `AUTOMATED` | 用户切换工具时取消插件放置状态                      | `PASS` |
-| UT-COMPAT-04 | `AUTOMATED` | 锁存 Zotero 仅以只读状态暴露的 host 保存失败        | `PASS` |
-| UT-COMPAT-05 | `AUTOMATED` | 空删除批次不访问 host Promise，也不误报擦除失败     | `PASS` |
-| UT-COMPAT-06 | `AUTOMATED` | 保存屏障等待真实擦除条目消失，并对卡死操作超时      | `PASS` |
-| UT-COMPAT-07 | `AUTOMATED` | reader reload 后重绑且停用时不残留嵌套 wrapper      | `PASS` |
-| UT-COMPAT-08 | `AUTOMATED` | 独立笔记窗口关闭前 flush 未保存笔迹                 | `PASS` |
-| UT-COMPAT-09 | `AUTOMATED` | 关闭时保存失败则保持窗口并报告                      | `PASS` |
-| UT-COMPAT-10 | `AUTOMATED` | barrier 期间被选中的 reader tab 不被自动卸载        | `PASS` |
-| UT-COMPAT-11 | `AUTOMATED` | 工具栏初始化前已发生的 editable-reader 保存失败锁存 | `PASS` |
-| UT-COMPAT-12 | `AUTOMATED` | ReaderTab.close 的宿主副作用前执行保存屏障          | `PASS` |
-| UT-COMPAT-13 | `AUTOMATED` | 加页前阻止新 reader open 并等待既有 open 完成       | `PASS` |
-| UT-COMPAT-14 | `AUTOMATED` | 卡死的擦除事务在保存屏障中超时而非永久挂起          | `PASS` |
-| UT-COMPAT-15 | `AUTOMATED` | 卡死的既有 reader open 使加页安全失败而非继续替换   | `PASS` |
-| UT-COMPAT-16 | `AUTOMATED` | 插件文件变换排在 Zotero 原生 PDFWorker 操作之后     | `PASS` |
-| UT-COMPAT-17 | `AUTOMATED` | pen 放置后原生立即切回 pointer 仍捕获正确 key       | `PASS` |
-| UT-COMPAT-18 | `AUTOMATED` | 同次事件出现多个候选便签时拒绝猜测关联              | `PASS` |
-| UT-COMPAT-19 | `AUTOMATED` | 极早点击时插件监听先运行仍在事件结束后捕获 key      | `PASS` |
-| UT-COMPAT-20 | `AUTOMATED` | 无放置事件出现同色便签时不误认领                    | `PASS` |
-| UT-COMPAT-21 | `AUTOMATED` | 通过 Zotero DOM 精确 ID 激活偏移显示的便签图标      | `PASS` |
-| UT-COMPAT-22 | `AUTOMATED` | 无 DOM ID 的点击不复用先前选中的插件便签            | `PASS` |
-| UT-COMPAT-23 | `AUTOMATED` | 普通 Zotero 便签不触发插件打开行为                  | `PASS` |
-| UT-COMPAT-24 | `AUTOMATED` | 内部 manager 替换时清除旧 pending/failure 状态      | `PASS` |
-| UT-COMPAT-25 | `AUTOMATED` | 未首次保存即完全擦除的 ink 无数据库条目时正常完成   | `PASS` |
-| UT-NET-01    | `AUTOMATED` | 下载取消后，文件访问及停用屏障等待原请求结束        | `PASS` |
-| STATIC-01    | 静态检查    | TypeScript `tsc --noEmit`                           | `PASS` |
-| BUILD-01     | 构建检查    | XPI 根目录包含 manifest、bootstrap、bundle 和许可证 | `PASS` |
-| BUILD-02     | 构建检查    | XPI 不包含 `node_modules` 或未替换模板变量          | `PASS` |
-| BUILD-03     | 构建检查    | manifest/package 版本一致，兼容范围锁定为 9.0.6     | `PASS` |
-| BUILD-04     | 构建检查    | `pdf-lib` 已进入运行时 bundle                       | `PASS` |
+| ID           | 类型        | 覆盖内容                                                | 结果   |
+| ------------ | ----------- | ------------------------------------------------------- | ------ |
+| UT-PDF-01    | `AUTOMATED` | 创建一页 A4 空白 PDF                                    | `PASS` |
+| UT-PDF-02    | `AUTOMATED` | 追加页面时沿用末页尺寸并保留已有页面内容                | `PASS` |
+| UT-PDF-03    | `AUTOMATED` | 损坏 PDF 被拒绝且不产生输出                             | `PASS` |
+| UT-PDF-04    | `AUTOMATED` | 跨 realm IOUtils 字节先复制再交给 pdf-lib               | `PASS` |
+| UT-FILE-01   | `AUTOMATED` | 安全替换在 commit 前保留恢复副本                        | `PASS` |
+| UT-FILE-02   | `AUTOMATED` | 已完成替换可 rollback                                   | `PASS` |
+| UT-FILE-03   | `AUTOMATED` | 写后校验失败时恢复原文件                                | `PASS` |
+| UT-FILE-04   | `AUTOMATED` | 自动恢复失败时保留并报告 recovery copy                  | `PASS` |
+| UT-FILE-05   | `AUTOMATED` | 拒绝覆盖读取后被并发修改的 PDF                          | `PASS` |
+| UT-FILE-06   | `AUTOMATED` | recovery copy 不可读时进入人工恢复状态                  | `PASS` |
+| UT-FILE-07   | `AUTOMATED` | 临时文件清理失败不覆盖已成功的安全替换结果              | `PASS` |
+| UT-FILE-08   | `AUTOMATED` | 原文件恢复验证成功后，清理失败不误报恢复失败            | `PASS` |
+| UT-FILE-09   | `AUTOMATED` | 隔离竞争中不删除被外部再次替换的目标文件                | `PASS` |
+| UT-QUEUE-01  | `AUTOMATED` | 同一附件操作严格串行                                    | `PASS` |
+| UT-QUEUE-02  | `AUTOMATED` | 一次失败不阻塞后续操作                                  | `PASS` |
+| UT-QUEUE-03  | `AUTOMATED` | 不同附件可独立推进                                      | `PASS` |
+| UT-QUEUE-04  | `AUTOMATED` | 50 个快速连续操作不重叠且结果顺序完整                   | `PASS` |
+| UT-QUEUE-05  | `AUTOMATED` | 快速队列中前项失败后后项继续执行                        | `PASS` |
+| UT-QUEUE-06  | `AUTOMATED` | 单附件 idle barrier 会等待随后排入的任务                | `PASS` |
+| UT-QUEUE-07  | `AUTOMATED` | shutdown barrier 等待所有附件队列清空                   | `PASS` |
+| UT-REL-01    | `AUTOMATED` | 正确解析同库、同父条目、双向关联                        | `PASS` |
+| UT-REL-02    | `AUTOMATED` | 拒绝缺失或多目标的便签关联                              | `PASS` |
+| UT-REL-03    | `AUTOMATED` | 拒绝跨 library 或跨父条目目标                           | `PASS` |
+| UT-REL-04    | `AUTOMATED` | 要求 stored PDF、插件 marker 和反向关联                 | `PASS` |
+| UT-REL-05    | `AUTOMATED` | 区分已删除的目标附件                                    | `PASS` |
+| UT-REL-06    | `AUTOMATED` | 在单一数据库事务中写入双向关联                          | `PASS` |
+| UT-REL-07    | `AUTOMATED` | 写入前拒绝跨 library 关联                               | `PASS` |
+| UT-REL-08    | `AUTOMATED` | 损坏的 Zotero item URI 被归类为无效关联                 | `PASS` |
+| UT-REL-09    | `AUTOMATED` | 关联事务回滚后恢复关系/tag 缓存及 tag dirty 状态        | `PASS` |
+| UT-REL-10    | `AUTOMATED` | 同一事务永久删除便签并把笔记 PDF 移入回收站             | `PASS` |
+| UT-REL-11    | `AUTOMATED` | 反向关联不独占时拒绝成对删除                            | `PASS` |
+| UT-REL-12    | `AUTOMATED` | 成对删除回滚后重载条目并恢复全局 relation index         | `PASS` |
+| UT-REL-13    | `AUTOMATED` | 提交后 host callback 异常不重建关系或误报删除失败       | `PASS` |
+| UT-COMPAT-01 | `AUTOMATED` | 检测只读 reader 静默拒绝 note tool                      | `PASS` |
+| UT-COMPAT-02 | `AUTOMATED` | 放置操作捕获本次原生便签的精确 key                      | `PASS` |
+| UT-COMPAT-03 | `AUTOMATED` | 用户切换工具时取消插件放置状态                          | `PASS` |
+| UT-COMPAT-04 | `AUTOMATED` | 锁存 Zotero 仅以只读状态暴露的 host 保存失败            | `PASS` |
+| UT-COMPAT-05 | `AUTOMATED` | 不包装删除 dispatcher 或访问其跨域 Promise              | `PASS` |
+| UT-COMPAT-06 | `AUTOMATED` | 由 host 数字 ID 变化等待真实擦除并对卡死操作超时        | `PASS` |
+| UT-COMPAT-07 | `AUTOMATED` | reader reload 后重绑且停用时不残留嵌套 wrapper          | `PASS` |
+| UT-COMPAT-08 | `AUTOMATED` | 独立笔记窗口关闭前 flush 未保存笔迹                     | `PASS` |
+| UT-COMPAT-09 | `AUTOMATED` | 关闭时保存失败则保持窗口并报告                          | `PASS` |
+| UT-COMPAT-10 | `AUTOMATED` | barrier 期间被选中的 reader tab 不被自动卸载            | `PASS` |
+| UT-COMPAT-11 | `AUTOMATED` | 工具栏初始化前已发生的 editable-reader 保存失败锁存     | `PASS` |
+| UT-COMPAT-12 | `AUTOMATED` | ReaderTab.close 的宿主副作用前执行保存屏障              | `PASS` |
+| UT-COMPAT-13 | `AUTOMATED` | 加页前阻止新 reader open 并等待既有 open 完成           | `PASS` |
+| UT-COMPAT-14 | `AUTOMATED` | 卡死的擦除事务在保存屏障中超时而非永久挂起              | `PASS` |
+| UT-COMPAT-15 | `AUTOMATED` | 卡死的既有 reader open 使加页安全失败而非继续替换       | `PASS` |
+| UT-COMPAT-16 | `AUTOMATED` | 插件文件变换排在 Zotero 原生 PDFWorker 操作之后         | `PASS` |
+| UT-COMPAT-17 | `AUTOMATED` | pen 放置后原生立即切回 pointer 仍捕获正确 key           | `PASS` |
+| UT-COMPAT-18 | `AUTOMATED` | 同次事件出现多个候选便签时拒绝猜测关联                  | `PASS` |
+| UT-COMPAT-19 | `AUTOMATED` | 极早点击时插件监听先运行仍在事件结束后捕获 key          | `PASS` |
+| UT-COMPAT-20 | `AUTOMATED` | 无放置事件出现同色便签时不误认领                        | `PASS` |
+| UT-COMPAT-21 | `AUTOMATED` | 通过 Zotero DOM 精确 ID 激活偏移显示的便签图标          | `PASS` |
+| UT-COMPAT-22 | `AUTOMATED` | 无 DOM ID 的点击不复用先前选中的插件便签                | `PASS` |
+| UT-COMPAT-23 | `AUTOMATED` | 普通 Zotero 便签不触发插件打开行为                      | `PASS` |
+| UT-COMPAT-24 | `AUTOMATED` | 内部 manager 替换时清除旧 pending/failure 状态          | `PASS` |
+| UT-COMPAT-25 | `AUTOMATED` | 未首次保存即完全擦除的 ink 无数据库条目时正常完成       | `PASS` |
+| UT-COMPAT-26 | `AUTOMATED` | 受保护的 reader-realm 删除参数完全交还 Zotero           | `PASS` |
+| UT-COMPAT-27 | `AUTOMATED` | 未来不可配置的 annotationItemIDs 属性不被修改           | `PASS` |
+| UT-NOTE-01   | `AUTOMATED` | 懒加载父子数据，编号取有效附件最小空缺并忽略回收站      | `PASS` |
+| UT-NOTE-02   | `AUTOMATED` | 打开 reader 先 flush 再 erase/trash，flush 失败时不删除 | `PASS` |
+| UT-NOTE-03   | `AUTOMATED` | cold parent metadata 加载失败时清理刚创建的便签         | `PASS` |
+| UT-NOTE-04   | `AUTOMATED` | 新便签清理失败时保留已创建 PDF，避免永久断链            | `PASS` |
+| UT-UI-01     | `AUTOMATED` | 插件便签菜单同时提供打开及成对删除入口                  | `PASS` |
+| UT-UI-02     | `AUTOMATED` | 成对删除确认默认选择取消且取消时不写入                  | `PASS` |
+| UT-UI-03     | `AUTOMATED` | 明确确认后才调用成对删除服务                            | `PASS` |
+| UT-NET-01    | `AUTOMATED` | 下载取消后，文件访问及停用屏障等待原请求结束            | `PASS` |
+| STATIC-01    | 静态检查    | TypeScript `tsc --noEmit`                               | `PASS` |
+| BUILD-01     | 构建检查    | XPI 根目录包含 manifest、bootstrap、bundle 和许可证     | `PASS` |
+| BUILD-02     | 构建检查    | XPI 不包含 `node_modules` 或未替换模板变量              | `PASS` |
+| BUILD-03     | 构建检查    | manifest/package 版本一致，兼容范围锁定为 9.0.6         | `PASS` |
+| BUILD-04     | 构建检查    | `pdf-lib` 已进入运行时 bundle                           | `PASS` |
 
 执行命令：
 
@@ -113,7 +139,7 @@ npm test
 npm run build
 ```
 
-结果摘要：TypeScript 类型检查通过；Vitest 共有 6 个测试文件、54 项测试，全部通过；XPI
+结果摘要：TypeScript 类型检查通过；Vitest 共有 7 个测试文件、68 项测试，全部通过；XPI
 已生成并通过 `scripts/validate-xpi.mjs`。
 
 这些结果证明纯 TypeScript/PDF/文件替换/队列逻辑和静态包结构符合当前断言，不证明
@@ -130,7 +156,7 @@ Zotero 内部 API 可以在 GUI 中正常工作。
 
 ## 客户端验收矩阵
 
-矩阵状态以当前 0.1.2 为准；0.1.1 的已知失败保留在上面的环境记录中。
+矩阵状态以当前 0.1.3 为准；0.1.1 和 0.1.2 的已知失败保留在上面的环境记录中。
 
 | ID   | 场景           | 核心预期                                                  | 状态      |
 | ---- | -------------- | --------------------------------------------------------- | --------- |
@@ -159,6 +185,7 @@ Zotero 内部 API 可以在 GUI 中正常工作。
 | Z-23 | 卸载           | 重启后数据仍可读取，插件功能不再介入                      | `NOT RUN` |
 | Z-24 | 同步往返       | 两个独立 profile 间关系、附件、重命名、笔迹和加页正确往返 | `NOT RUN` |
 | Z-25 | iPad 手写往返  | Mac 创建并同步；iPad 从附件列表书写；Mac 同步后笔迹完整   | `NOT RUN` |
+| Z-26 | 成对删除和编号 | 确认后只永久删便签、PDF 入回收站，随后复用最小空缺编号    | `NOT RUN` |
 
 ## 关键用例步骤
 
@@ -202,6 +229,20 @@ Zotero 内部 API 可以在 GUI 中正常工作。
 只在可丢弃的测试 profile 中操作。先关闭相关阅读器并备份测试附件，再模拟文件被移走或
 不可写。检查插件是否明确报错、原文件或恢复副本是否存在，以及 UI 是否没有显示虚假成功。
 测试结束后恢复文件权限和测试附件。
+
+### Z-13/Z-26：普通删除、成对删除和编号
+
+1. 新建两个插件便签，确认得到 `Sticky Notes 1.pdf` 和 `Sticky Notes 2.pdf`。
+2. 对第一个便签按 Zotero 原生 Delete/Backspace，确认只删除便签，活动中的 PDF 仍保留；再
+   新建时不得复用仍被该孤立 PDF 占用的编号 1。
+3. 重新创建一组测试数据，右键插件便签选择“删除便签并将笔记 PDF 移到回收站…”，先选择
+   “取消”，确认两项均不改变。
+4. 再次执行并选择“删除两者”，确认便签永久消失，而 PDF 及其 ink annotation 位于 Zotero
+   回收站并可恢复；原文阅读器不关闭、页码和缩放不改变。
+5. 不恢复旧 PDF，创建新便签，确认复用当前有效附件标题中的最小空缺。
+6. 模拟保存或事务失败时，只能保留两项或明确报错，不能只删除一半。
+
+恢复回收站 PDF 不会恢复永久删除的便签或关系，并且可能与后来复用编号的 PDF 同名。
 
 ### Z-21：导出
 

@@ -14,7 +14,7 @@ import {
   withSyncPaused,
 } from "../compat/zotero-9-reader";
 import { appendBlankPage, createBlankNotePdf, getPdfPageCount } from "../pdf/pdf-document";
-import { linkStickyAndNote, resolveLinkedNote } from "../relations";
+import { deleteStickyAndTrashNote, linkStickyAndNote, resolveLinkedNote } from "../relations";
 import type { ReaderLike, ZoteroItemLike } from "../types";
 
 export type AttachmentProblem =
@@ -163,11 +163,14 @@ async function markAttachmentForManualRecovery(item: ZoteroItemLike): Promise<vo
   await item.saveTx({ skipAll: true });
 }
 
-async function nextAttachmentTitle(parent: ZoteroItemLike): Promise<string> {
+export async function nextAttachmentTitle(parent: ZoteroItemLike): Promise<string> {
+  await parent.loadDataType?.("childItems");
   const existingTitles = new Set<string>();
-  for (const id of parent.getAttachments?.(true) ?? []) {
+  for (const id of parent.getAttachments?.(false) ?? []) {
     const child = (await Zotero.Items.getAsync(id)) as unknown as ZoteroItemLike | false;
-    if (child) existingTitles.add(String(child.getField("title") ?? ""));
+    if (!child || child.deleted) continue;
+    await child.loadDataType?.("itemData");
+    existingTitles.add(String(child.getField("title") ?? ""));
   }
   for (let index = 1; ; index += 1) {
     const title = `Sticky Notes ${index}.pdf`;
@@ -186,8 +189,38 @@ async function eraseQuietly(item: ZoteroItemLike | undefined): Promise<boolean> 
   }
 }
 
+async function failCreation(
+  annotation: ZoteroItemLike,
+  noteAttachment: ZoteroItemLike | undefined,
+  error: unknown,
+): Promise<never> {
+  const annotationRemoved = await eraseQuietly(annotation);
+  if (!annotationRemoved) {
+    // Never destroy the only recoverable target while its source sticky still
+    // exists. Even an incompletely linked PDF is safer for the user to inspect
+    // and recover than a permanent dangling sticky.
+    const rollbackError = new Error(
+      `Sticky-note creation failed and the new sticky could not be removed, so the notes attachment was preserved. Inspect annotation ${annotation.libraryID}/${annotation.key} and attachment ${noteAttachment?.libraryID ?? "not-created"}/${noteAttachment?.key ?? "not-created"}.`,
+      { cause: error },
+    );
+    Zotero.logError(rollbackError);
+    throw rollbackError;
+  }
+  const attachmentRemoved = await eraseQuietly(noteAttachment);
+  if (noteAttachment && !attachmentRemoved) {
+    const rollbackError = new Error(
+      `Sticky-note creation failed; the new sticky was removed, but the notes attachment could not be removed. Inspect attachment ${noteAttachment.libraryID}/${noteAttachment.key}.`,
+      { cause: error },
+    );
+    Zotero.logError(rollbackError);
+    throw rollbackError;
+  }
+  throw error;
+}
+
 export class NoteService {
   private readonly noteFileQueue = new SerialQueue<string>();
+  private readonly parentLifecycleQueue = new SerialQueue<string>();
   private readonly downloadSettlementBarriers = new Map<string, Promise<void>>();
 
   private queueKey(item: ZoteroItemLike): string {
@@ -212,9 +245,16 @@ export class NoteService {
   async waitForAllPendingFileOperations(): Promise<void> {
     for (;;) {
       const downloads = [...this.downloadSettlementBarriers.values()];
-      await Promise.all([this.noteFileQueue.waitForAllIdle(), ...downloads]);
+      await Promise.all([
+        this.parentLifecycleQueue.waitForAllIdle(),
+        this.noteFileQueue.waitForAllIdle(),
+        ...downloads,
+      ]);
       if (this.downloadSettlementBarriers.size === 0) {
-        await this.noteFileQueue.waitForAllIdle();
+        await Promise.all([
+          this.parentLifecycleQueue.waitForAllIdle(),
+          this.noteFileQueue.waitForAllIdle(),
+        ]);
         if (this.downloadSettlementBarriers.size === 0) return;
       }
     }
@@ -269,69 +309,163 @@ export class NoteService {
     sourceAttachment: ZoteroItemLike,
     annotation: ZoteroItemLike,
   ): Promise<ZoteroItemLike> {
-    if (!sourceAttachment.parentID) {
-      throw new Error("Source PDF has no parent bibliographic item");
+    let parent: ZoteroItemLike;
+    try {
+      if (!sourceAttachment.parentID) {
+        throw new Error("Source PDF has no parent bibliographic item");
+      }
+      const loadedParent = (await Zotero.Items.getAsync(sourceAttachment.parentID)) as unknown as
+        | ZoteroItemLike
+        | false;
+      if (!loadedParent || loadedParent.deleted) {
+        throw new Error("Parent bibliographic item is unavailable");
+      }
+      const library = Zotero.Libraries.get(sourceAttachment.libraryID);
+      if (
+        !sourceAttachment.isEditable?.() ||
+        !library ||
+        !library.editable ||
+        !library.filesEditable
+      ) {
+        throw new Error("The source attachment or its library is read-only");
+      }
+      parent = loadedParent;
+    } catch (error) {
+      return failCreation(annotation, undefined, error);
     }
-    const parent = (await Zotero.Items.getAsync(sourceAttachment.parentID)) as unknown as
+
+    return this.parentLifecycleQueue.run(this.queueKey(parent), async () => {
+      let tempPath: string | undefined;
+      let noteAttachment: ZoteroItemLike | undefined;
+
+      try {
+        const currentParent = (await Zotero.Items.getByLibraryAndKeyAsync(
+          parent.libraryID,
+          parent.key,
+        )) as unknown as ZoteroItemLike | false;
+        if (!currentParent || currentParent.deleted) {
+          throw new Error("Parent bibliographic item became unavailable");
+        }
+        const title = await nextAttachmentTitle(currentParent);
+        tempPath = PathUtils.join(
+          PathUtils.tempDir,
+          `zotero-pdf-sticky-notes-${randomToken()}.pdf`,
+        );
+        await IOUtils.write(tempPath, await createBlankNotePdf());
+        noteAttachment = (await (Zotero.Attachments.importFromFile as any)({
+          file: tempPath,
+          parentItemID: currentParent.id,
+          title,
+          fileBaseName: title.replace(/\.pdf$/i, ""),
+          contentType: "application/pdf",
+          moveFile: true,
+        })) as unknown as ZoteroItemLike;
+
+        await linkStickyAndNote(annotation, noteAttachment);
+        const verified = await resolveLinkedNote(annotation);
+        if (verified.status !== "ok" || verified.item.id !== noteAttachment.id) {
+          throw new Error(`Link verification failed (${verified.status})`);
+        }
+        await this.ensureLocalFile(noteAttachment, false);
+        return noteAttachment;
+      } catch (error) {
+        return failCreation(annotation, noteAttachment, error);
+      } finally {
+        try {
+          if (tempPath && (await IOUtils.exists(tempPath))) {
+            await IOUtils.remove(tempPath, { ignoreAbsent: true });
+          }
+        } catch (cleanupError) {
+          logError(cleanupError);
+        }
+      }
+    });
+  }
+
+  async deleteForAnnotation(
+    annotation: ZoteroItemLike,
+    expectedNote: ZoteroItemLike,
+  ): Promise<void> {
+    if (!annotation.parentID) throw new Error("The sticky note has no source PDF");
+    const source = (await Zotero.Items.getAsync(annotation.parentID)) as unknown as
       | ZoteroItemLike
       | false;
-    if (!parent || parent.deleted) throw new Error("Parent bibliographic item is unavailable");
-    const library = Zotero.Libraries.get(sourceAttachment.libraryID);
-    if (
-      !sourceAttachment.isEditable?.() ||
-      !library ||
-      !library.editable ||
-      !library.filesEditable
-    ) {
-      throw new Error("The source attachment or its library is read-only");
+    if (!source || !source.parentID) {
+      throw new Error("The source PDF or its parent item is unavailable");
     }
+    const sourceID = source.id;
+    const parent = (await Zotero.Items.getAsync(source.parentID)) as unknown as
+      | ZoteroItemLike
+      | false;
+    if (!parent || parent.deleted) throw new Error("The parent bibliographic item is unavailable");
 
-    const title = await nextAttachmentTitle(parent);
-    const tempPath = PathUtils.join(
-      PathUtils.tempDir,
-      `zotero-pdf-sticky-notes-${randomToken()}.pdf`,
-    );
-    let noteAttachment: ZoteroItemLike | undefined;
+    await this.parentLifecycleQueue.run(this.queueKey(parent), async () => {
+      const freshAnnotation = (await Zotero.Items.getByLibraryAndKeyAsync(
+        annotation.libraryID,
+        annotation.key,
+      )) as unknown as ZoteroItemLike | false;
+      const freshNote = (await Zotero.Items.getByLibraryAndKeyAsync(
+        expectedNote.libraryID,
+        expectedNote.key,
+      )) as unknown as ZoteroItemLike | false;
+      if (!freshAnnotation || !freshNote || freshAnnotation.deleted || freshNote.deleted) {
+        throw new Error("The sticky note or notes PDF no longer exists");
+      }
+      if (
+        freshAnnotation.id !== annotation.id ||
+        freshNote.id !== expectedNote.id ||
+        freshAnnotation.parentID !== sourceID ||
+        freshNote.parentID !== parent.id
+      ) {
+        throw new Error("The sticky note or notes PDF moved before deletion");
+      }
 
-    try {
-      await IOUtils.write(tempPath, await createBlankNotePdf());
-      noteAttachment = (await (Zotero.Attachments.importFromFile as any)({
-        file: tempPath,
-        parentItemID: parent.id,
-        title,
-        fileBaseName: title.replace(/\.pdf$/i, ""),
-        contentType: "application/pdf",
-        moveFile: true,
-      })) as unknown as ZoteroItemLike;
-
-      await linkStickyAndNote(annotation, noteAttachment);
-      const verified = await resolveLinkedNote(annotation);
-      if (verified.status !== "ok" || verified.item.id !== noteAttachment.id) {
-        throw new Error(`Link verification failed (${verified.status})`);
-      }
-      await this.ensureLocalFile(noteAttachment, false);
-      return noteAttachment;
-    } catch (error) {
-      const annotationRemoved = await eraseQuietly(annotation);
-      const attachmentRemoved = await eraseQuietly(noteAttachment);
-      if ((!annotationRemoved && annotation.id) || (noteAttachment && !attachmentRemoved)) {
-        const rollbackError = new Error(
-          `Sticky-note creation failed and cleanup was incomplete. Inspect annotation ${annotation.libraryID}/${annotation.key} and attachment ${noteAttachment?.libraryID ?? "unknown"}/${noteAttachment?.key ?? "unknown"}.`,
-          { cause: error },
-        );
-        Zotero.logError(rollbackError);
-        throw rollbackError;
-      }
-      throw error;
-    } finally {
-      try {
-        if (await IOUtils.exists(tempPath)) {
-          await IOUtils.remove(tempPath, { ignoreAbsent: true });
-        }
-      } catch (cleanupError) {
-        logError(cleanupError);
-      }
-    }
+      await this.noteFileQueue.run(this.queueKey(freshNote), () =>
+        withReaderOpeningPaused(freshNote.id, async () => {
+          await this.waitForDownloadSettlement(freshNote);
+          const frozenReaders = new Set<ReaderLike>();
+          try {
+            const flushedReaders = new Set<ReaderLike>();
+            for (;;) {
+              const unflushed = readerInstancesForItem(freshNote.id).filter(
+                (reader) => !flushedReaders.has(reader),
+              );
+              if (unflushed.length === 0) break;
+              for (const reader of unflushed) {
+                try {
+                  await waitForReader(reader);
+                } catch (error) {
+                  if (!readerInstancesForItem(freshNote.id).includes(reader)) continue;
+                  throw new Error(
+                    "A notes reader did not finish initializing; close it and retry deletion",
+                    { cause: error },
+                  );
+                }
+                if (!readerInstancesForItem(freshNote.id).includes(reader)) continue;
+                freezeReaders([reader]);
+                frozenReaders.add(reader);
+                await flushReaderAnnotations(reader);
+                flushedReaders.add(reader);
+              }
+            }
+            await deleteStickyAndTrashNote(freshAnnotation, freshNote);
+          } catch (error) {
+            const reloads = await Promise.allSettled([
+              freshAnnotation.reload?.(["primaryData", "relations", "tags"], true),
+              freshNote.reload?.(["primaryData", "relations", "tags"], true),
+              source.reload?.(["primaryData", "childItems"], true),
+              parent.reload?.(["primaryData", "childItems"], true),
+            ]);
+            for (const result of reloads) {
+              if (result.status === "rejected") logError(result.reason);
+            }
+            throw error;
+          } finally {
+            unfreezeReaders([...frozenReaders]);
+          }
+        }),
+      );
+    });
   }
 
   async ensureLocalFile(
@@ -604,5 +738,6 @@ export class NoteService {
 
   clear(): void {
     this.noteFileQueue.clear();
+    this.parentLifecycleQueue.clear();
   }
 }

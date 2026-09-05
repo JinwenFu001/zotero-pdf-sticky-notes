@@ -41,6 +41,7 @@ export class StickyNotesPlugin {
     { ownerWindow?: Window; unloadListener?: () => void }
   >();
   private readonly activeTasks = new Set<Promise<unknown>>();
+  private readonly pendingPairDeletions = new Set<string>();
   private lifetime = new AbortController();
   private notifierID?: string;
 
@@ -137,6 +138,11 @@ export class StickyNotesPlugin {
       onCommand: () =>
         this.trackTask(this.openLinkedNote(annotation as ZoteroItemLike, event.reader)),
     });
+    event.append({
+      label: message("deleteBoth"),
+      onCommand: () =>
+        this.trackTask(this.confirmAndDeletePair(annotation as ZoteroItemLike, event.reader)),
+    });
   };
 
   async startup(_reason: number): Promise<void> {
@@ -196,6 +202,7 @@ export class StickyNotesPlugin {
       setReaderTool(pending.reader, { type: "pointer" });
     }
     this.pendingPlacements.clear();
+    this.pendingPairDeletions.clear();
     this.noteService.clear();
     unregisterReaderHooks();
   }
@@ -446,6 +453,54 @@ export class StickyNotesPlugin {
         this.logError(error);
         alertError(sourceReader._window, "openFailed", error);
       }
+    }
+  }
+
+  private async confirmAndDeletePair(
+    annotation: ZoteroItemLike,
+    sourceReader: ReaderLike,
+  ): Promise<void> {
+    if (!this.data.initialized) return;
+    const operationKey = `${annotation.libraryID}:${annotation.key}`;
+    if (this.pendingPairDeletions.has(operationKey)) return;
+    this.pendingPairDeletions.add(operationKey);
+    try {
+      const resolution = await resolveLinkedNote(annotation);
+      if (!this.data.initialized) return;
+      if (resolution.status !== "ok") {
+        const key: MessageKey =
+          resolution.status === "deleted" ? "targetDeleted" : "relationInvalid";
+        alertError(sourceReader._window, key);
+        return;
+      }
+      await resolution.item.loadDataType?.("itemData");
+      const title = String(resolution.item.getField("title") || "notes PDF");
+      const prompt = message("deleteBothPrompt").replace("{title}", title);
+      const promptService = Services.prompt;
+      const buttonFlags =
+        Number(promptService.BUTTON_POS_0) * Number(promptService.BUTTON_TITLE_IS_STRING) +
+        Number(promptService.BUTTON_POS_1) * Number(promptService.BUTTON_TITLE_CANCEL) +
+        Number(promptService.BUTTON_POS_1_DEFAULT);
+      const choice = promptService.confirmEx(
+        sourceReader._window as any,
+        "Zotero PDF Sticky Notes",
+        prompt,
+        buttonFlags,
+        message("deleteBothButton"),
+        "",
+        "",
+        "",
+        { value: false },
+      );
+      if (choice !== 0 || !this.data.initialized) return;
+
+      await this.noteService.deleteForAnnotation(annotation, resolution.item);
+      if (this.data.initialized) showStatus("deletedBoth");
+    } catch (error) {
+      this.logError(error);
+      if (this.data.initialized) alertError(sourceReader._window, "deleteBothFailed", error);
+    } finally {
+      this.pendingPairDeletions.delete(operationKey);
     }
   }
 

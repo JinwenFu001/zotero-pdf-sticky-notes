@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MARKER_TAG_TYPE, NOTE_TAG, RELATION_PREDICATE, STICKY_TAG } from "../src/constants";
-import { linkStickyAndNote, resolveLinkedNote } from "../src/relations";
+import { deleteStickyAndTrashNote, linkStickyAndNote, resolveLinkedNote } from "../src/relations";
 import type { ZoteroItemLike } from "../src/types";
 
 type FakeItem = ZoteroItemLike & {
@@ -49,6 +49,7 @@ function makeItem(
     removeTag: (tag) => tagMap.delete(tag),
     save,
     saveTx: vi.fn(async () => true),
+    erase: vi.fn(async () => true),
     loadDataType: vi.fn(async () => undefined),
     reload: vi.fn(async () => undefined),
     _clearChanged: vi.fn(),
@@ -76,6 +77,7 @@ function makeLinkedFixture(overrides?: {
       ...annotationBase,
       annotationType: "note",
       isAnnotation: () => true,
+      isEditable: () => true,
       ...overrides?.annotation,
     },
     overrides?.stickyRelations ?? {
@@ -89,6 +91,7 @@ function makeLinkedFixture(overrides?: {
       attachmentContentType: "application/pdf",
       isPDFAttachment: () => true,
       isStoredFileAttachment: () => true,
+      isEditable: () => true,
       ...overrides?.note,
     },
     overrides?.noteRelations ?? {
@@ -102,20 +105,49 @@ function makeLinkedFixture(overrides?: {
 function installZoteroMock(items: FakeItem[]) {
   const byURI = new Map(items.map((item) => [itemURI(item), item]));
   const byID = new Map(items.map((item) => [item.id, item]));
-  const executeTransaction = vi.fn(async (callback: () => Promise<void>) => callback());
+  let currentCallbacks:
+    | { commit: Array<() => unknown>; rollback: Array<() => unknown> }
+    | undefined;
+  const addCurrentCallback = vi.fn((type: "commit" | "rollback", callback: () => unknown) => {
+    if (!currentCallbacks) throw new Error("No transaction is active");
+    currentCallbacks[type].push(callback);
+  });
+  const executeTransaction = vi.fn(async (callback: () => Promise<void>) => {
+    currentCallbacks = { commit: [], rollback: [] };
+    try {
+      await callback();
+    } catch (error) {
+      const rollbackCallbacks = currentCallbacks.rollback.splice(0);
+      for (const rollback of rollbackCallbacks) await rollback();
+      currentCallbacks = undefined;
+      throw error;
+    }
+    const commitCallbacks = currentCallbacks.commit.splice(0);
+    // Zotero discards temporary rollback callbacks once SQLite has committed.
+    currentCallbacks.rollback = [];
+    try {
+      for (const commit of commitCallbacks) await commit();
+    } finally {
+      currentCallbacks = undefined;
+    }
+  });
+  const trash = vi.fn(async () => undefined);
+  const register = vi.fn();
   vi.stubGlobal("Zotero", {
     logError: vi.fn(),
     URI: {
       getItemURI: itemURI,
       getURIItem: vi.fn(async (uri: string) => byURI.get(uri) ?? false),
     },
-    Relations: { unregister: vi.fn() },
+    Relations: { register, unregister: vi.fn() },
     Items: {
       getAsync: vi.fn(async (id: number) => byID.get(id) ?? false),
+      trash,
     },
-    DB: { executeTransaction },
+    Libraries: { get: vi.fn(() => ({ editable: true, filesEditable: true })) },
+    DB: { addCurrentCallback, executeTransaction },
   });
-  return { executeTransaction };
+  return { addCurrentCallback, executeTransaction, register, trash };
 }
 
 afterEach(() => {
@@ -205,6 +237,109 @@ describe("sticky-note relationships", () => {
     const fixture = makeLinkedFixture({ note: { deleted: true } });
     installZoteroMock([fixture.source, fixture.annotation, fixture.note]);
     await expect(resolveLinkedNote(fixture.annotation)).resolves.toEqual({ status: "deleted" });
+  });
+
+  it("atomically erases the sticky and moves its notes PDF to the Trash", async () => {
+    const fixture = makeLinkedFixture();
+    const { executeTransaction, trash } = installZoteroMock([
+      fixture.source,
+      fixture.annotation,
+      fixture.note,
+    ]);
+
+    await deleteStickyAndTrashNote(fixture.annotation, fixture.note);
+
+    expect(executeTransaction).toHaveBeenCalledOnce();
+    expect(fixture.annotation.erase).toHaveBeenCalledOnce();
+    expect(trash).toHaveBeenCalledWith(fixture.note.id);
+    expect(fixture.note.erase).not.toHaveBeenCalled();
+    expect(fixture.note.eraseTx).toBeUndefined();
+  });
+
+  it("refuses pair deletion when another sticky relation shares the notes PDF", async () => {
+    const fixture = makeLinkedFixture({
+      noteRelations: {
+        [RELATION_PREDICATE]: [
+          itemURI({ libraryID: 1, key: "STICKY" }),
+          itemURI({ libraryID: 1, key: "OTHER" }),
+        ],
+      },
+    });
+    const { executeTransaction, trash } = installZoteroMock([
+      fixture.source,
+      fixture.annotation,
+      fixture.note,
+    ]);
+
+    await expect(deleteStickyAndTrashNote(fixture.annotation, fixture.note)).rejects.toThrow(
+      /exclusively/,
+    );
+
+    expect(executeTransaction).not.toHaveBeenCalled();
+    expect(fixture.annotation.erase).not.toHaveBeenCalled();
+    expect(trash).not.toHaveBeenCalled();
+  });
+
+  it("restores loaded relations and their global index after pair deletion rolls back", async () => {
+    const fixture = makeLinkedFixture();
+    const { register, trash } = installZoteroMock([
+      fixture.source,
+      fixture.annotation,
+      fixture.note,
+    ]);
+    trash.mockRejectedValueOnce(new Error("trash failed"));
+
+    await expect(deleteStickyAndTrashNote(fixture.annotation, fixture.note)).rejects.toThrow(
+      "trash failed",
+    );
+
+    expect(fixture.annotation.reload).toHaveBeenCalledWith(
+      ["primaryData", "relations", "tags"],
+      true,
+    );
+    expect(fixture.note.reload).toHaveBeenCalledWith(["primaryData", "relations", "tags"], true);
+    expect(register).toHaveBeenCalledWith(
+      "item",
+      fixture.annotation.id,
+      RELATION_PREDICATE,
+      fixture.noteURI,
+    );
+    expect(register).toHaveBeenCalledWith(
+      "item",
+      fixture.note.id,
+      RELATION_PREDICATE,
+      fixture.annotationURI,
+    );
+  });
+
+  it("does not reconstruct relations when a host callback fails after deletion commits", async () => {
+    const fixture = makeLinkedFixture();
+    fixture.annotation.erase = vi.fn(async () => {
+      (Zotero.DB as any).addCurrentCallback("commit", () => {
+        throw new Error("late commit callback failed");
+      });
+      return true;
+    });
+    const { register, trash } = installZoteroMock([
+      fixture.source,
+      fixture.annotation,
+      fixture.note,
+    ]);
+
+    await expect(
+      deleteStickyAndTrashNote(fixture.annotation, fixture.note),
+    ).resolves.toBeUndefined();
+
+    expect(fixture.annotation.erase).toHaveBeenCalledOnce();
+    expect(trash).toHaveBeenCalledWith(fixture.note.id);
+    expect(register).not.toHaveBeenCalled();
+    expect(fixture.annotation.reload).not.toHaveBeenCalled();
+    expect(fixture.note.reload).not.toHaveBeenCalled();
+    expect(Zotero.logError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "A Zotero commit callback failed after paired deletion was committed",
+      }),
+    );
   });
 
   it("classifies a malformed Zotero item URI as an invalid relation", async () => {

@@ -547,11 +547,13 @@ describe("Zotero 9 reader compatibility", () => {
     };
     const reader = {
       itemID: 7,
+      annotationItemIDs: [],
       _iframeWindow: makeWindow(),
       _internalReader: internal,
     } as unknown as ReaderLike;
     enableImmediateAnnotationSaving(reader);
 
+    expect(manager._onDelete).toBe(originalDelete);
     expect(manager._onDelete([])).toBe(opaqueResult);
     await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
 
@@ -559,13 +561,82 @@ describe("Zotero 9 reader compatibility", () => {
     expect(thenAccess).not.toHaveBeenCalled();
   });
 
-  it("accepts complete erase of ink that had no saved database row", async () => {
+  it("leaves protected reader-realm deletion arguments entirely to Zotero", async () => {
+    const rawIDs = ["PROTECT1"];
+    const protectedIDs = new Proxy(rawIDs, {
+      get(target, property, receiver) {
+        if (property === "length") throw new Error('Permission denied to access property "length"');
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const opaqueResult = {};
+    const originalDelete = vi.fn((_ids: string[]) => opaqueResult);
+    const manager = {
+      _skipAnnotationSavingDebounce: false,
+      _savingInProgress: false,
+      _unsavedAnnotations: new Set<string>(),
+      _triggerSaving: vi.fn(async () => undefined),
+      _onDelete: originalDelete,
+    };
+    const reader = {
+      itemID: 72,
+      annotationItemIDs: [],
+      _iframeWindow: makeWindow(),
+      _internalReader: {
+        _state: { readOnly: false },
+        _annotationManager: manager,
+        setReadOnly: vi.fn(),
+      },
+    } as unknown as ReaderLike;
+    enableImmediateAnnotationSaving(reader);
+
+    expect(manager._onDelete).toBe(originalDelete);
+    expect(manager._onDelete(protectedIDs)).toBe(opaqueResult);
+    await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
+
+    expect(originalDelete).toHaveBeenCalledOnce();
+    expect(originalDelete.mock.calls[0][0]).toBe(protectedIDs);
+  });
+
+  it("does not alter a future non-configurable host annotation ID property", async () => {
+    const originalDelete = vi.fn((_ids: string[]) => undefined);
+    const manager = {
+      _skipAnnotationSavingDebounce: false,
+      _savingInProgress: false,
+      _unsavedAnnotations: new Set<string>(),
+      _triggerSaving: vi.fn(async () => undefined),
+      _onDelete: originalDelete,
+    };
+    const reader = {
+      itemID: 74,
+      _iframeWindow: makeWindow(),
+      _internalReader: {
+        _state: { readOnly: false },
+        _annotationManager: manager,
+        setReadOnly: vi.fn(),
+      },
+    } as unknown as ReaderLike;
+    Object.defineProperty(reader, "annotationItemIDs", {
+      configurable: false,
+      enumerable: true,
+      writable: true,
+      value: [],
+    });
+    enableImmediateAnnotationSaving(reader);
+
+    expect(manager._onDelete).toBe(originalDelete);
+    expect(() => manager._onDelete([])).not.toThrow();
+    await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
+
+    expect(originalDelete).toHaveBeenCalledWith([]);
+  });
+
+  it("does not invent a deletion barrier for ink erased before its first save", async () => {
     const attachment = { id: 71, libraryID: 1 };
     const getAsync = vi.fn(async () => {
-      throw new Error("No item ID should be polled when the lookup returned no row");
+      throw new Error("No persisted item ID should be polled");
     });
     Object.assign(Zotero, {
-      DB: { valueQueryAsync: vi.fn(async () => false) },
       Items: { get: vi.fn(() => false), getAsync },
     });
     const manager = {
@@ -577,6 +648,7 @@ describe("Zotero 9 reader compatibility", () => {
     };
     const reader = {
       itemID: attachment.id,
+      annotationItemIDs: [],
       _item: attachment,
       _iframeWindow: makeWindow(),
       _internalReader: {
@@ -590,7 +662,6 @@ describe("Zotero 9 reader compatibility", () => {
     manager._onDelete(["UNSAVED1"]);
     await expect(flushReaderAnnotations(reader)).resolves.toBeUndefined();
 
-    expect(Zotero.DB.valueQueryAsync).toHaveBeenCalledOnce();
     expect(getAsync).not.toHaveBeenCalled();
   });
 
@@ -606,7 +677,6 @@ describe("Zotero 9 reader compatibility", () => {
       const opaqueResult = {};
       Object.defineProperty(opaqueResult, "then", { get: thenAccess });
       Object.assign(Zotero, {
-        DB: { valueQueryAsync: vi.fn(async () => annotation.id) },
         Items: {
           // Simulate a valid database annotation that another code path has
           // unloaded from the synchronous item cache.
@@ -617,7 +687,11 @@ describe("Zotero 9 reader compatibility", () => {
           getByLibraryAndKey: vi.fn(() => false),
         },
       });
-      const originalDelete = vi.fn((_ids: string[]) => opaqueResult);
+      let reader!: ReaderLike;
+      const originalDelete = vi.fn((_ids: string[]) => {
+        reader.annotationItemIDs = [];
+        return opaqueResult;
+      });
       const manager = {
         _skipAnnotationSavingDebounce: false,
         _savingInProgress: false,
@@ -630,8 +704,9 @@ describe("Zotero 9 reader compatibility", () => {
         _annotationManager: manager,
         setReadOnly: vi.fn(),
       };
-      const reader = {
+      reader = {
         itemID: attachment.id,
+        annotationItemIDs: [annotation.id],
         _item: attachment,
         _iframeWindow: makeWindow(),
         _internalReader: internal,
@@ -662,7 +737,6 @@ describe("Zotero 9 reader compatibility", () => {
       const attachment = { id: 18, libraryID: 1 };
       const annotation = { id: 180, key: "STALLED1", libraryID: 1, parentID: attachment.id };
       Object.assign(Zotero, {
-        DB: { valueQueryAsync: vi.fn(async () => annotation.id) },
         Items: {
           get: vi.fn((id: number) => (id === annotation.id ? annotation : false)),
           getAsync: vi.fn(async (id: number) => (id === annotation.id ? annotation : false)),
@@ -671,7 +745,10 @@ describe("Zotero 9 reader compatibility", () => {
           ),
         },
       });
-      const originalDelete = vi.fn((_ids: string[]) => undefined);
+      let reader!: ReaderLike;
+      const originalDelete = vi.fn((_ids: string[]) => {
+        reader.annotationItemIDs = [];
+      });
       const manager = {
         _skipAnnotationSavingDebounce: false,
         _savingInProgress: false,
@@ -684,8 +761,9 @@ describe("Zotero 9 reader compatibility", () => {
         _annotationManager: manager,
         setReadOnly: vi.fn(),
       };
-      const reader = {
+      reader = {
         itemID: attachment.id,
+        annotationItemIDs: [annotation.id],
         _item: attachment,
         _iframeWindow: makeWindow(),
         _internalReader: internal,
@@ -693,26 +771,44 @@ describe("Zotero 9 reader compatibility", () => {
       enableImmediateAnnotationSaving(reader);
       manager._onDelete([annotation.key]);
 
-      const flush = flushReaderAnnotations(reader);
-      const assertion = expect(flush).rejects.toThrow(/Timed out while waiting.*erased/);
+      const outcome = flushReaderAnnotations(reader).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(15_001);
 
-      await assertion;
+      const result = await outcome;
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("Expected the stalled deletion to fail");
+      expect(result.error).toBeInstanceOf(Error);
+      expect((result.error as Error).message).toMatch(/failed to save an erased/);
+      expect((result.error as Error & { cause?: unknown }).cause).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(/Timed out while waiting.*erased/),
+        }),
+      );
     } finally {
       vi.useRealTimers();
     }
   });
 
   it("rebinds save hooks and resets stale deletion state after manager replacement", async () => {
+    const annotation = { id: 191, key: "BROKEN01" };
+    Object.assign(Zotero, {
+      Items: {
+        get: vi.fn(() => false),
+        getAsync: vi.fn(async () => {
+          throw new Error("old observer failure");
+        }),
+      },
+    });
     const firstManager = {
       _skipAnnotationSavingDebounce: false,
       _savingInProgress: false,
       _unsavedAnnotations: new Set<string>(),
       _triggerSaving: vi.fn(async () => undefined),
-      _onDelete: vi.fn((_ids: string[]) => {
-        throw new Error("old manager deletion failure");
-      }),
+      _onDelete: vi.fn((_ids: string[]) => undefined),
     };
     const secondManager = {
       _skipAnnotationSavingDebounce: false,
@@ -735,12 +831,14 @@ describe("Zotero 9 reader compatibility", () => {
     };
     const reader = {
       itemID: 9,
+      annotationItemIDs: [annotation.id],
       _iframeWindow: makeWindow(),
       _internalReader: internal,
     } as unknown as ReaderLike;
 
     enableImmediateAnnotationSaving(reader);
-    firstManager._onDelete([]);
+    reader.annotationItemIDs = [];
+    await vi.waitFor(() => expect(Zotero.Items.getAsync).toHaveBeenCalled());
     await expect(flushReaderAnnotations(reader)).rejects.toThrow(/failed to save an erased/);
     internal._annotationManager = secondManager;
     enableImmediateAnnotationSaving(reader);
@@ -760,7 +858,6 @@ describe("Zotero 9 reader compatibility", () => {
       const attachment = { id: 19, libraryID: 1 };
       const annotation = { id: 190, key: "OLDMGR01", libraryID: 1, parentID: attachment.id };
       Object.assign(Zotero, {
-        DB: { valueQueryAsync: vi.fn(async () => annotation.id) },
         Items: {
           get: vi.fn((id: number) => (id === annotation.id ? annotation : false)),
           getAsync: vi.fn(async (id: number) => (id === annotation.id ? annotation : false)),
@@ -789,13 +886,14 @@ describe("Zotero 9 reader compatibility", () => {
       };
       const reader = {
         itemID: attachment.id,
+        annotationItemIDs: [annotation.id],
         _item: attachment,
         _iframeWindow: makeWindow(),
         _internalReader: internal,
       } as unknown as ReaderLike;
 
       enableImmediateAnnotationSaving(reader);
-      firstManager._onDelete([annotation.key]);
+      reader.annotationItemIDs = [];
       internal._annotationManager = secondManager;
       enableImmediateAnnotationSaving(reader);
 

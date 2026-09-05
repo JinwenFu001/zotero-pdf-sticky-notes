@@ -86,8 +86,10 @@ interface ImmediateSaveState {
   pendingDeletionTransactions: Set<Promise<void>>;
   originalSetReadOnly?: (...args: any[]) => any;
   wrappedSetReadOnly?: (...args: any[]) => any;
-  originalManagerOnDelete?: (...args: any[]) => any;
-  wrappedManagerOnDelete?: (...args: any[]) => any;
+  annotationItemIDsDescriptor?: PropertyDescriptor;
+  annotationItemIDsValue?: unknown;
+  annotationItemIDsGetter?: () => unknown;
+  annotationItemIDsSetter?: (value: unknown) => void;
 }
 
 interface ReaderOpenMonitor {
@@ -759,51 +761,7 @@ export function enableImmediateAnnotationSaving(reader: ReaderLike): void {
       internal.setReadOnly = state.wrappedSetReadOnly;
     }
 
-    if (typeof manager._onDelete === "function") {
-      // Zotero 9.0.6 calls AnnotationManager._onDelete([]) for every ordinary
-      // annotation save. Hook this reader-realm dispatcher, whose return value
-      // is intentionally ignored, rather than the chrome callback stored on
-      // internal._onDeleteAnnotations. The latter returns a cross-compartment
-      // Promise that the reader cannot safely await or assimilate.
-      state.originalManagerOnDelete = manager._onDelete;
-      const wrappedManagerOnDelete = function (this: any, ...args: any[]) {
-        const keys = Array.isArray(args[0])
-          ? Array.from(args[0] as unknown[], (key) => String(key))
-          : [];
-        // Start authoritative DB lookups before dispatching the erase so an
-        // existing annotation cannot disappear between capture and deletion.
-        const itemIDs = keys.length ? deletionItemIDs(reader, keys) : undefined;
-        let result: any;
-        let dispatched = false;
-        try {
-          result = state.originalManagerOnDelete?.apply(this, args);
-          dispatched = true;
-        } catch (error) {
-          state.deleteFailureDetected = true;
-          state.deleteFailure = error;
-        }
-        if (dispatched && itemIDs) {
-          const tracked = itemIDs
-            .then((ids) => waitForDeletedItems(state, ids))
-            .then(
-              () => undefined,
-              (error) => {
-                state.deleteFailureDetected = true;
-                state.deleteFailure = error;
-              },
-            );
-          state.pendingDeletionTransactions.add(tracked);
-          void tracked.finally(() => state.pendingDeletionTransactions.delete(tracked));
-        } else if (itemIDs) {
-          // The dispatch failure is already latched; consume a concurrently
-          // started lookup failure without replacing the more direct cause.
-          void itemIDs.catch(logError);
-        }
-        return result;
-      };
-      state.wrappedManagerOnDelete = exportIntoReader(reader, wrappedManagerOnDelete);
-      manager._onDelete = state.wrappedManagerOnDelete;
-    }
+    installDeletedAnnotationObserver(state);
 
     manager._skipAnnotationSavingDebounce = true;
     ensureReaderCleanupBinding(reader);
@@ -829,39 +787,91 @@ function readerHasPendingDeletions(reader: ReaderLike): boolean {
   return Boolean(immediateSaveStates.get(reader)?.pendingDeletionTransactions.size);
 }
 
-async function deletionItemIDs(reader: ReaderLike, keys: string[]): Promise<number[]> {
-  const attachment =
-    reader._item ?? (Zotero.Items.get(reader.itemID) as ZoteroItemLike | false | undefined);
-  if (!attachment) throw new Error("The notes attachment is unavailable while saving erased ink");
-
-  const ids = await Promise.all(
-    keys.map((key) =>
-      Zotero.DB.valueQueryAsync(
-        "SELECT I.itemID FROM items I JOIN itemAnnotations IA USING (itemID) " +
-          "WHERE I.libraryID=? AND I.key=? AND IA.parentItemID=?",
-        [attachment.libraryID, key, reader.itemID],
-        { noCache: true },
-      ),
-    ),
-  );
-  // A newly drawn annotation can be completely erased before its first save.
-  // In that case there is no database row whose disappearance needs waiting for.
-  const itemIDs: number[] = [];
-  for (const value of ids) {
-    if (value === false || value === null || value === undefined) continue;
-    const itemID = Number(value);
-    if (Number.isInteger(itemID) && itemID > 0) itemIDs.push(itemID);
+function numericItemIDs(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const result: number[] = [];
+  for (const candidate of value) {
+    const itemID = Number(candidate);
+    if (Number.isInteger(itemID) && itemID > 0) result.push(itemID);
   }
-  return [...new Set(itemIDs)];
+  return [...new Set(result)];
+}
+
+function trackDeletedItems(state: ImmediateSaveState, itemIDs: number[]): void {
+  if (!itemIDs.length) return;
+  const tracked = waitForDeletedItems(state, itemIDs).then(
+    () => undefined,
+    (error) => {
+      state.deleteFailureDetected = true;
+      state.deleteFailure = error;
+    },
+  );
+  state.pendingDeletionTransactions.add(tracked);
+  void tracked.finally(() => state.pendingDeletionTransactions.delete(tracked));
+}
+
+function installDeletedAnnotationObserver(state: ImmediateSaveState): void {
+  try {
+    const reader = state.reader as ReaderLike & Record<string, unknown>;
+    const descriptor = Object.getOwnPropertyDescriptor(reader, "annotationItemIDs");
+    // Zotero 9.0.6 creates this as a normal writable own data property. Do not
+    // interfere if a future release changes that contract.
+    if (
+      !descriptor ||
+      !("value" in descriptor) ||
+      descriptor.configurable !== true ||
+      descriptor.writable !== true ||
+      !Array.isArray(descriptor.value)
+    ) {
+      return;
+    }
+    state.annotationItemIDsDescriptor = descriptor;
+    state.annotationItemIDsValue = descriptor.value;
+    state.annotationItemIDsGetter = () => state.annotationItemIDsValue;
+    state.annotationItemIDsSetter = (nextValue: unknown) => {
+      const previousValue = state.annotationItemIDsValue;
+      state.annotationItemIDsValue = nextValue;
+      if (!state.active) return;
+      try {
+        const previousIDs = numericItemIDs(previousValue);
+        const nextIDs = new Set(numericItemIDs(nextValue));
+        trackDeletedItems(
+          state,
+          previousIDs.filter((itemID) => !nextIDs.has(itemID)),
+        );
+      } catch (error) {
+        // Observation must never disrupt Zotero's native annotation save path.
+        logError(error);
+      }
+    };
+    Object.defineProperty(reader, "annotationItemIDs", {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get: state.annotationItemIDsGetter,
+      set: state.annotationItemIDsSetter,
+    });
+  } catch (error) {
+    // This is a version-pinned verification hook. Zotero's native saving must
+    // continue unchanged if the host property cannot be observed.
+    logError(error);
+  }
 }
 
 async function waitForDeletedItems(state: ImmediateSaveState, itemIDs: number[]): Promise<void> {
+  const timeoutMessage = "Timed out while waiting for Zotero to save an erased annotation";
+  const deadline = Date.now() + READER_INIT_TIMEOUT_MS;
   while (state.active) {
-    const remaining = await Promise.all(
-      itemIDs.map((itemID) => (Zotero.Items.getAsync as any)(itemID, { noCache: true })),
+    const remainingTime = deadline - Date.now();
+    if (remainingTime <= 0) throw new Error(timeoutMessage);
+    const remaining = await withTimeout(
+      Promise.all(
+        itemIDs.map((itemID) => (Zotero.Items.getAsync as any)(itemID, { noCache: true })),
+      ),
+      remainingTime,
+      timeoutMessage,
     );
     if (remaining.every((item) => !item)) return;
-    await delay(25);
+    await delay(Math.min(25, Math.max(1, deadline - Date.now())));
   }
 }
 
@@ -869,11 +879,7 @@ async function waitForReaderDeletionTransactions(reader: ReaderLike): Promise<vo
   const state = immediateSaveStates.get(reader);
   if (!state) return;
   while (state.pendingDeletionTransactions.size > 0) {
-    await withTimeout(
-      Promise.all([...state.pendingDeletionTransactions]).then(() => undefined),
-      READER_INIT_TIMEOUT_MS,
-      "Timed out while waiting for Zotero to save an erased handwritten annotation",
-    );
+    await Promise.all([...state.pendingDeletionTransactions]);
   }
   if (!state.active || immediateSaveStates.get(reader) !== state) return;
   if (state.deleteFailureDetected) {
@@ -903,20 +909,27 @@ function restoreImmediateSaveBindings(state: ImmediateSaveState): void {
     logError(error);
   }
   try {
+    const reader = state.reader as ReaderLike & Record<string, unknown>;
+    const descriptor = Object.getOwnPropertyDescriptor(reader, "annotationItemIDs");
     if (
-      state.wrappedManagerOnDelete &&
-      state.originalManagerOnDelete &&
-      state.manager._onDelete === state.wrappedManagerOnDelete
+      state.annotationItemIDsDescriptor &&
+      descriptor?.get === state.annotationItemIDsGetter &&
+      descriptor?.set === state.annotationItemIDsSetter
     ) {
-      state.manager._onDelete = state.originalManagerOnDelete;
+      Object.defineProperty(reader, "annotationItemIDs", {
+        ...state.annotationItemIDsDescriptor,
+        value: state.annotationItemIDsValue,
+      });
     }
   } catch (error) {
     logError(error);
   }
   state.originalSetReadOnly = undefined;
   state.wrappedSetReadOnly = undefined;
-  state.originalManagerOnDelete = undefined;
-  state.wrappedManagerOnDelete = undefined;
+  state.annotationItemIDsDescriptor = undefined;
+  state.annotationItemIDsValue = undefined;
+  state.annotationItemIDsGetter = undefined;
+  state.annotationItemIDsSetter = undefined;
 }
 
 function removeImmediateSaveState(state: ImmediateSaveState): void {

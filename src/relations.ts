@@ -183,3 +183,113 @@ export async function resolveLinkedNote(annotation: ZoteroItemLike): Promise<Lin
   }
   return { status: "ok", item };
 }
+
+/**
+ * Permanently erase the annotation while moving its recoverable PDF to the
+ * Zotero Trash. Both database changes share one host transaction; the PDF
+ * attachment itself is deliberately not erased because Zotero removes its
+ * storage directory before a surrounding database rollback could restore it.
+ */
+export async function deleteStickyAndTrashNote(
+  annotation: ZoteroItemLike,
+  expectedNote: ZoteroItemLike,
+): Promise<void> {
+  const resolution = await resolveLinkedNote(annotation);
+  if (
+    resolution.status !== "ok" ||
+    resolution.item.id !== expectedNote.id ||
+    resolution.item.libraryID !== expectedNote.libraryID ||
+    resolution.item.key !== expectedNote.key
+  ) {
+    throw new Error(`The sticky-note link changed before deletion (${resolution.status})`);
+  }
+  const note = resolution.item;
+  const annotationURI = Zotero.URI.getItemURI(annotation as any);
+  const reverseRelations = relations(note, RELATION_PREDICATE);
+  if (reverseRelations.length !== 1 || reverseRelations[0] !== annotationURI) {
+    throw new Error("The notes PDF is not linked exclusively to this sticky note");
+  }
+  const library = Zotero.Libraries.get(annotation.libraryID);
+  if (
+    !annotation.isEditable?.() ||
+    !note.isEditable?.() ||
+    !library ||
+    !library.editable ||
+    !library.filesEditable
+  ) {
+    throw new Error("The sticky note, notes PDF, or its library is read-only");
+  }
+  if (typeof annotation.erase !== "function") {
+    throw new Error("Zotero's in-transaction annotation deletion API is unavailable");
+  }
+
+  const noteURI = Zotero.URI.getItemURI(note as any);
+  const database = Zotero.DB as typeof Zotero.DB & {
+    addCurrentCallback?: (type: "commit" | "rollback", callback: () => unknown) => void;
+  };
+  if (typeof database.addCurrentCallback !== "function") {
+    throw new Error("Zotero's transaction outcome callback API is unavailable");
+  }
+
+  let committed = false;
+  let mutationStarted = false;
+  let recoveryFinished = false;
+  const recoverRolledBackState = async () => {
+    if (recoveryFinished) return;
+    recoveryFinished = true;
+    const reloads = await Promise.allSettled([
+      annotation.reload?.(["primaryData", "relations", "tags"], true),
+      note.reload?.(["primaryData", "relations", "tags"], true),
+    ]);
+    for (const result of reloads) {
+      if (result.status === "rejected") {
+        Zotero.logError(
+          result.reason instanceof Error ? result.reason : new Error(String(result.reason)),
+        );
+      }
+    }
+    // erase()/trash() can update Zotero.Relations' global index before the
+    // surrounding SQLite transaction commits. A rollback restores the rows,
+    // so restore the two already-validated pairs idempotently for this session.
+    try {
+      (Zotero as any).Relations.register("item", annotation.id, RELATION_PREDICATE, noteURI);
+      (Zotero as any).Relations.register("item", note.id, RELATION_PREDICATE, annotationURI);
+    } catch (registerError) {
+      Zotero.logError(
+        registerError instanceof Error ? registerError : new Error(String(registerError)),
+      );
+    }
+  };
+
+  try {
+    await database.executeTransaction(async () => {
+      // Register this before host item operations so it runs before any of
+      // their commit callbacks. Zotero's transaction wrapper can reject after
+      // SQLite has committed if a later commit callback throws.
+      database.addCurrentCallback?.("commit", () => {
+        committed = true;
+      });
+      database.addCurrentCallback?.("rollback", recoverRolledBackState);
+      mutationStarted = true;
+      await annotation.erase?.();
+      await Zotero.Items.trash(note.id);
+    });
+  } catch (error) {
+    if (committed) {
+      // The requested deletion is durable. Do not report it as failed or
+      // reconstruct relations that no longer exist just because a later host
+      // commit callback failed.
+      Zotero.logError(
+        new Error("A Zotero commit callback failed after paired deletion was committed", {
+          cause: error,
+        }),
+      );
+      return;
+    }
+    // Real Zotero runs the temporary rollback callback above. This fallback
+    // also covers test doubles or a future wrapper that rejects after rolling
+    // back without dispatching that callback.
+    if (mutationStarted) await recoverRolledBackState();
+    throw error;
+  }
+}

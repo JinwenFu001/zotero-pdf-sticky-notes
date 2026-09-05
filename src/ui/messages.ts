@@ -3,6 +3,12 @@ const messages = {
     addSticky: "Add handwritten sticky note",
     addPage: "Add blank page",
     openNotes: "Open handwritten notes",
+    deleteBoth: "Delete sticky and move notes PDF to Trash…",
+    deleteBothButton: "Delete both",
+    deleteBothPrompt:
+      'Delete this sticky note and "{title}"?\n\nThe sticky note will be permanently deleted. The notes PDF and its handwriting will be moved to the Zotero Trash and can be restored until the Trash is emptied.',
+    deletedBoth: "Sticky deleted; notes PDF moved to the Zotero Trash.",
+    deleteBothFailed: "The sticky note and notes PDF could not be deleted together.",
     placeHint: "Click a position on the PDF to place the handwritten sticky note.",
     placementExpired: "Sticky-note placement timed out. Choose Add handwritten sticky note again.",
     parentRequired:
@@ -34,6 +40,12 @@ const messages = {
     addSticky: "添加手写便签",
     addPage: "添加空白页",
     openNotes: "打开手写笔记",
+    deleteBoth: "删除便签并将笔记 PDF 移到回收站…",
+    deleteBothButton: "删除两者",
+    deleteBothPrompt:
+      "删除此便签及“{title}”？\n\n便签将永久删除；笔记 PDF 及其中的手写批注将移入 Zotero 回收站，并可在清空回收站前恢复。",
+    deletedBoth: "便签已删除；笔记 PDF 已移入 Zotero 回收站。",
+    deleteBothFailed: "无法同时删除便签和笔记 PDF。",
     placeHint: "请在 PDF 页面上的具体位置单击，以放置手写便签。",
     placementExpired: "便签放置已超时，请重新单击“添加手写便签”。",
     parentRequired:

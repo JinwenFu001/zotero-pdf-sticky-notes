@@ -2,7 +2,14 @@ import type { FileOps } from "../types";
 
 export const zoteroFileOps: FileOps = {
   exists: (path) => IOUtils.exists(path),
-  read: (path) => IOUtils.read(path),
+  read: async (path) => {
+    const bytes = await IOUtils.read(path);
+    // IOUtils belongs to Zotero's privileged global. Its typed arrays are from
+    // a different JavaScript realm, so libraries such as pdf-lib reject them
+    // when they use `instanceof Uint8Array`. Copy into the plugin realm at the
+    // file boundary, matching Zotero 9's own PDF worker bridge.
+    return new Uint8Array(bytes);
+  },
   write: async (path, data) => {
     await IOUtils.write(path, data);
   },

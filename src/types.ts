@@ -25,6 +25,7 @@ export interface ZoteroItemLike {
   removeTag?: (tag: string) => boolean;
   save: (options?: Record<string, unknown>) => Promise<number | boolean>;
   saveTx: (options?: Record<string, unknown>) => Promise<number | boolean>;
+  erase?: (options?: Record<string, unknown>) => Promise<boolean | void>;
   eraseTx?: (options?: Record<string, unknown>) => Promise<boolean | void>;
   getFilePathAsync?: () => Promise<string | false | null>;
   getAttachments?: (includeTrashed?: boolean) => number[];
@@ -34,6 +35,7 @@ export interface ZoteroItemLike {
 
 export interface ReaderLike {
   itemID: number;
+  annotationItemIDs?: number[];
   _instanceID?: string;
   tabID?: string;
   _item?: ZoteroItemLike;
