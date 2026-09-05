@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.xpi binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+
+# Preserve upstream license bytes, including original line endings.
+addon/licenses/*.txt binary

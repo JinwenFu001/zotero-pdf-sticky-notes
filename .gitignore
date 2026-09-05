@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+build/
+dist/
+.scaffold/
+*.xpi
+*.tsbuildinfo
+
+# Test and tool output
+coverage/
+.cache/
+*.log
+
+# Local environment and Zotero test profiles
+.env
+.env.*
+!.env.example
+.zotero-dev/
+.zotero-test/
+
+# macOS
+.DS_Store

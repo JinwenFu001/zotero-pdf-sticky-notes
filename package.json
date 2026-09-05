@@ -1,0 +1,59 @@
+{
+  "name": "zotero-pdf-sticky-notes",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open a dedicated handwritten-notes PDF from a sticky annotation in Zotero's PDF reader.",
+  "config": {
+    "addonName": "Zotero PDF Sticky Notes",
+    "addonID": "zotero-pdf-sticky-notes@prototype.invalid",
+    "addonRef": "zoteropdfstickynotes",
+    "addonInstance": "ZoteroPDFStickyNotes",
+    "prefsPrefix": "extensions.zotero.zotero-pdf-sticky-notes"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/zotero-pdf-sticky-notes.git"
+  },
+  "author": "Jinwen Fu",
+  "homepage": "https://github.com/OWNER/zotero-pdf-sticky-notes",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "zotero-plugin serve",
+    "licenses:sync": "node scripts/sync-licenses.mjs",
+    "build:xpi": "npm run licenses:sync && zotero-plugin build && node scripts/validate-xpi.mjs",
+    "build": "npm run typecheck && npm run build:xpi",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "check": "npm run format:check && npm run typecheck && npm test && npm run build:xpi",
+    "release:check": "node scripts/validate-release-metadata.mjs",
+    "prerelease": "npm run release:check",
+    "release": "zotero-plugin release"
+  },
+  "dependencies": {
+    "pdf-lib": "1.17.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "prettier": "3.7.4",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "zotero-plugin-scaffold": "0.8.3",
+    "zotero-types": "4.1.3"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "esbuild": "0.28.1"
+  },
+  "prettier": {
+    "printWidth": 100,
+    "tabWidth": 2,
+    "endOfLine": "lf"
+  }
+}

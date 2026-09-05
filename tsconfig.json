@@ -1,0 +1,12 @@
+{
+  "extends": "zotero-types/entries/sandbox/",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "types": ["zotero-types/entries/sandbox", "node", "vitest/globals"]
+  },
+  "include": ["src", "tests", "typings", "zotero-plugin.config.ts"],
+  "exclude": ["addon", "dist", "node_modules"]
+}
