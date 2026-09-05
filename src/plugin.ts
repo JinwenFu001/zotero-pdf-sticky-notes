@@ -11,7 +11,7 @@ import {
   unregisterReaderHooks,
   waitForPendingCloseSaveGuards,
 } from "./compat/zotero-9-reader";
-import { PLACEMENT_TIMEOUT_MS, PLUGIN_ID, TESTED_ZOTERO_VERSION } from "./constants";
+import { PLACEMENT_TIMEOUT_MS, PLUGIN_ID, STICKY_COLOR, TESTED_ZOTERO_VERSION } from "./constants";
 import { SafeReplaceError } from "./files/safe-replace";
 import {
   AttachmentUnavailableError,
@@ -226,7 +226,7 @@ export class StickyNotesPlugin {
       | ZoteroItemLike
       | false;
     if (!item || item.deleted) return;
-    await item.loadDataType?.("relations");
+    await Promise.all([item.loadDataType?.("relations"), item.loadDataType?.("tags")]);
     if (!this.data.initialized) return;
     try {
       if (!slot.isConnected) return;
@@ -318,9 +318,11 @@ export class StickyNotesPlugin {
     this.pendingPlacements.set(source.id, pending);
     const cancelCapture = beginReaderNotePlacement(
       reader,
-      "#2ea8e5",
+      STICKY_COLOR,
       (key) => {
-        if (this.pendingPlacements.get(source.id) === pending) pending.expectedKey = key;
+        if (this.pendingPlacements.get(source.id) !== pending) return;
+        pending.expectedKey = key;
+        setReaderTool(reader, { type: "pointer" });
       },
       () => {
         if (this.pendingPlacements.get(source.id) !== pending) return;

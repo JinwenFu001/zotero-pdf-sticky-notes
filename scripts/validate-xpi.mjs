@@ -92,7 +92,8 @@ if (bundleSize < 200_000)
   throw new Error("Runtime bundle is unexpectedly small; pdf-lib may be missing");
 const bundleText = bundle.toString("utf8");
 for (const requiredRuntimeMarker of [
-  "urn:zotero-pdf-sticky-notes:sticky:v1",
+  "zotero-pdf-sticky-notes:sticky:v1",
+  "zotero-pdf-sticky-notes:note:v1",
   "exportFunction",
   "in_conflict",
   "failed to save an erased handwritten annotation",
@@ -101,6 +102,9 @@ for (const requiredRuntimeMarker of [
   if (!bundleText.includes(requiredRuntimeMarker)) {
     throw new Error(`Runtime bundle is missing ${requiredRuntimeMarker}`);
   }
+}
+if (bundleText.includes("urn:zotero-pdf-sticky-notes:") || bundleText.includes('"dc:type"')) {
+  throw new Error("Runtime bundle contains the obsolete, non-syncable relation marker format");
 }
 
 console.log(`Validated ${path.relative(process.cwd(), xpiPath)} (${entries.size} files)`);

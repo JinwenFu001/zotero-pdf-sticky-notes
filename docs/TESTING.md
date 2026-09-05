@@ -21,15 +21,19 @@
 - Zotero：9.0.6
 - Zotero BuildID：20260707110915
 - Gecko：140.12.0（BuildID 20260609153453）
-- 插件版本：0.1.0
-- XPI：`dist/zotero-pdf-sticky-notes-0.1.0.xpi`
-- XPI SHA-256：`fcb73c262b734f84826a362d43a001cb0694f491c6945618e21d9795393b4a10`
-- 客户端测试 profile：尚未创建或使用
-- 测试文献库：尚未创建
+- 插件版本：0.1.1
+- XPI：`dist/zotero-pdf-sticky-notes-0.1.1.xpi`
+- XPI SHA-256：`e1ea8af51cec2565ad0fa5fbebf0475b70350df0655ee7bdf0b1315be01a9735`
+- 客户端测试 profile：`developer`（仅执行过 0.1.0 首次 smoke test）
+- 测试文献库：0.1.1 尚未创建或使用
 - Zotero 数据同步：`NOT RUN`
 - Zotero 文件同步：`NOT RUN`
 
-本机 Zotero 版本检测和源码核对没有修改或使用用户的默认 Zotero profile。
+本机 Zotero 版本检测和源码核对没有修改或使用用户的默认 Zotero profile。0.1.0 曾在独立
+`developer` profile 中安装：工具栏入口出现，但选择“添加手写便签”后错误地报告 reader
+interface 不可用。源码复核确认 9.0.6 的接口存在，0.1.1 已改用
+`reader._iframeWindow.wrappedJSObject._reader` 并以原生事件后的 annotation ID 差集捕获；
+该回归修复尚未在真实客户端重测。
 
 ## 已执行的自动检查
 
@@ -62,7 +66,7 @@
 | UT-REL-06    | `AUTOMATED` | 在单一数据库事务中写入双向关联                      | `PASS` |
 | UT-REL-07    | `AUTOMATED` | 写入前拒绝跨 library 关联                           | `PASS` |
 | UT-REL-08    | `AUTOMATED` | 损坏的 Zotero item URI 被归类为无效关联             | `PASS` |
-| UT-REL-09    | `AUTOMATED` | 关联事务回滚后重载两个条目的关系缓存                | `PASS` |
+| UT-REL-09    | `AUTOMATED` | 关联事务回滚后恢复关系/tag 缓存及 tag dirty 状态    | `PASS` |
 | UT-COMPAT-01 | `AUTOMATED` | 检测只读 reader 静默拒绝 note tool                  | `PASS` |
 | UT-COMPAT-02 | `AUTOMATED` | 放置操作捕获本次原生便签的精确 key                  | `PASS` |
 | UT-COMPAT-03 | `AUTOMATED` | 用户切换工具时取消插件放置状态                      | `PASS` |
@@ -79,6 +83,10 @@
 | UT-COMPAT-14 | `AUTOMATED` | 卡死的擦除事务在保存屏障中超时而非永久挂起          | `PASS` |
 | UT-COMPAT-15 | `AUTOMATED` | 卡死的既有 reader open 使加页安全失败而非继续替换   | `PASS` |
 | UT-COMPAT-16 | `AUTOMATED` | 插件文件变换排在 Zotero 原生 PDFWorker 操作之后     | `PASS` |
+| UT-COMPAT-17 | `AUTOMATED` | pen 放置后原生立即切回 pointer 仍捕获正确 key       | `PASS` |
+| UT-COMPAT-18 | `AUTOMATED` | 同次事件出现多个候选便签时拒绝猜测关联              | `PASS` |
+| UT-COMPAT-19 | `AUTOMATED` | 极早点击时插件监听先运行仍在事件结束后捕获 key      | `PASS` |
+| UT-COMPAT-20 | `AUTOMATED` | 无放置事件出现同色便签时不误认领                    | `PASS` |
 | UT-NET-01    | `AUTOMATED` | 下载取消后，文件访问及停用屏障等待原请求结束        | `PASS` |
 | STATIC-01    | 静态检查    | TypeScript `tsc --noEmit`                           | `PASS` |
 | BUILD-01     | 构建检查    | XPI 根目录包含 manifest、bootstrap、bundle 和许可证 | `PASS` |
@@ -94,7 +102,7 @@ npm test
 npm run build
 ```
 
-结果摘要：TypeScript 类型检查通过；Vitest 共有 6 个测试文件、45 项测试，全部通过；XPI
+结果摘要：TypeScript 类型检查通过；Vitest 共有 6 个测试文件、49 项测试，全部通过；XPI
 已生成并通过 `scripts/validate-xpi.mjs`。
 
 这些结果证明纯 TypeScript/PDF/文件替换/队列逻辑和静态包结构符合当前断言，不证明
@@ -139,6 +147,7 @@ Zotero 内部 API 可以在 GUI 中正常工作。
 | Z-22 | 停用           | UI/监听器消失；笔记附件和原生笔迹仍可读取                  | `NOT RUN` |
 | Z-23 | 卸载           | 重启后数据仍可读取，插件功能不再介入                       | `NOT RUN` |
 | Z-24 | 同步往返       | 两个独立 profile 间关系、附件、重命名、笔迹和加页正确往返  | `NOT RUN` |
+| Z-25 | iPad 手写往返  | Mac 创建并同步；iPad 从附件列表书写；Mac 同步后笔迹完整    | `NOT RUN` |
 
 ## 关键用例步骤
 
@@ -210,6 +219,17 @@ Zotero 内部 API 可以在 GUI 中正常工作。
 5. 交换 A/B 再执行一轮，检查失败和冲突提示。
 
 关系解析、附件下载、标题变更、页数及笔迹必须全部通过，才能对外声称支持同步。
+
+### Z-25：iPad 伴随流程
+
+1. 在 Mac 的可丢弃测试文献中创建便签和笔记 PDF，并预先添加需要的空白页。
+2. 完成数据与附件同步，在 iPad 同一文献的附件列表中打开笔记 PDF。
+3. 使用 Apple Pencil 在第一页和末页写入不同标识，完成同步。
+4. Mac 同步后，从原文插件便签打开笔记，检查附件关联、页数和两处 ink annotation。
+5. 再从 Mac 写一处笔迹并同步回 iPad，检查双向往返。
+
+此用例不把“iPad 单击原文便签直达笔记”列为预期：iPad 客户端不运行桌面 XPI。iPad 也
+没有本插件的加页按钮，因此空白页应先在 Mac 准备。
 
 ## 单项结果记录模板
 

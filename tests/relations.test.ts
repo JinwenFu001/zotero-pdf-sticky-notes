@@ -1,23 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { NOTE_MARKER, RELATION_PREDICATE, STICKY_MARKER, TYPE_PREDICATE } from "../src/constants";
+import { MARKER_TAG_TYPE, NOTE_TAG, RELATION_PREDICATE, STICKY_TAG } from "../src/constants";
 import { linkStickyAndNote, resolveLinkedNote } from "../src/relations";
 import type { ZoteroItemLike } from "../src/types";
 
 type FakeItem = ZoteroItemLike & {
   relationMap: Map<string, string[]>;
+  tagMap: Map<string, number>;
+  _clearChanged: ReturnType<typeof vi.fn>;
 };
 
 const itemURI = (item: Pick<ZoteroItemLike, "libraryID" | "key">) =>
-  `zotero://select/libraries/${item.libraryID}/items/${item.key}`;
+  `http://zotero.org/users/${item.libraryID}/items/${item.key}`;
 
 function makeItem(
   options: Partial<ZoteroItemLike> & Pick<ZoteroItemLike, "id" | "key" | "libraryID">,
   initialRelations: Record<string, string[]> = {},
+  initialTags: Array<{ tag: string; type?: number }> = [],
 ): FakeItem {
   const relationMap = new Map(
     Object.entries(initialRelations).map(([predicate, values]) => [predicate, [...values]]),
   );
+  const tagMap = new Map(initialTags.map(({ tag, type = 0 }) => [tag, type]));
   const save = vi.fn(async () => true);
   return {
     parentID: false,
@@ -36,11 +40,20 @@ function makeItem(
       relationMap.set(predicate, remaining);
       return remaining.length !== values.length;
     },
+    getTags: () => [...tagMap].map(([tag, type]) => ({ tag, type })),
+    addTag: (tag, type = 0) => {
+      if (tagMap.get(tag) === type) return false;
+      tagMap.set(tag, type);
+      return true;
+    },
+    removeTag: (tag) => tagMap.delete(tag),
     save,
     saveTx: vi.fn(async () => true),
     loadDataType: vi.fn(async () => undefined),
     reload: vi.fn(async () => undefined),
+    _clearChanged: vi.fn(),
     relationMap,
+    tagMap,
     ...options,
   };
 }
@@ -50,6 +63,8 @@ function makeLinkedFixture(overrides?: {
   note?: Partial<ZoteroItemLike>;
   noteRelations?: Record<string, string[]>;
   stickyRelations?: Record<string, string[]>;
+  noteTags?: Array<{ tag: string; type?: number }>;
+  stickyTags?: Array<{ tag: string; type?: number }>;
 }) {
   const source = makeItem({ id: 10, key: "SOURCE", libraryID: 1, parentID: 100 });
   const annotationBase = { id: 11, key: "STICKY", libraryID: 1, parentID: source.id };
@@ -64,9 +79,9 @@ function makeLinkedFixture(overrides?: {
       ...overrides?.annotation,
     },
     overrides?.stickyRelations ?? {
-      [TYPE_PREDICATE]: [STICKY_MARKER],
       [RELATION_PREDICATE]: [noteURI],
     },
+    overrides?.stickyTags ?? [{ tag: STICKY_TAG, type: MARKER_TAG_TYPE }],
   );
   const note = makeItem(
     {
@@ -77,9 +92,9 @@ function makeLinkedFixture(overrides?: {
       ...overrides?.note,
     },
     overrides?.noteRelations ?? {
-      [TYPE_PREDICATE]: [NOTE_MARKER],
       [RELATION_PREDICATE]: [annotationURI],
     },
+    overrides?.noteTags ?? [{ tag: NOTE_TAG, type: MARKER_TAG_TYPE }],
   );
   return { annotation, annotationURI, note, noteURI, source };
 }
@@ -120,7 +135,7 @@ describe("sticky-note relationships", () => {
 
   it("rejects missing and ambiguous outgoing relations", async () => {
     const missing = makeLinkedFixture({
-      stickyRelations: { [TYPE_PREDICATE]: [STICKY_MARKER] },
+      stickyRelations: {},
     });
     installZoteroMock([missing.source, missing.annotation, missing.note]);
     await expect(resolveLinkedNote(missing.annotation)).resolves.toEqual({
@@ -130,8 +145,10 @@ describe("sticky-note relationships", () => {
     vi.unstubAllGlobals();
     const ambiguous = makeLinkedFixture({
       stickyRelations: {
-        [TYPE_PREDICATE]: [STICKY_MARKER],
-        [RELATION_PREDICATE]: ["zotero://one", "zotero://two"],
+        [RELATION_PREDICATE]: [
+          "http://zotero.org/users/1/items/ONE",
+          "http://zotero.org/users/1/items/TWO",
+        ],
       },
     });
     installZoteroMock([ambiguous.source, ambiguous.annotation, ambiguous.note]);
@@ -165,7 +182,7 @@ describe("sticky-note relationships", () => {
 
     vi.unstubAllGlobals();
     const noReciprocalLink = makeLinkedFixture({
-      noteRelations: { [TYPE_PREDICATE]: [NOTE_MARKER] },
+      noteRelations: {},
     });
     installZoteroMock([
       noReciprocalLink.source,
@@ -173,6 +190,13 @@ describe("sticky-note relationships", () => {
       noReciprocalLink.note,
     ]);
     await expect(resolveLinkedNote(noReciprocalLink.annotation)).resolves.toEqual({
+      status: "invalid-target",
+    });
+
+    vi.unstubAllGlobals();
+    const noMarkerTag = makeLinkedFixture({ noteTags: [] });
+    installZoteroMock([noMarkerTag.source, noMarkerTag.annotation, noMarkerTag.note]);
+    await expect(resolveLinkedNote(noMarkerTag.annotation)).resolves.toEqual({
       status: "invalid-target",
     });
   });
@@ -186,7 +210,6 @@ describe("sticky-note relationships", () => {
   it("classifies a malformed Zotero item URI as an invalid relation", async () => {
     const fixture = makeLinkedFixture({
       stickyRelations: {
-        [TYPE_PREDICATE]: [STICKY_MARKER],
         [RELATION_PREDICATE]: ["not-a-zotero-item-uri"],
       },
     });
@@ -222,9 +245,9 @@ describe("sticky-note relationships", () => {
 
     await linkStickyAndNote(annotation, note);
 
-    expect(annotation.relationMap.get(TYPE_PREDICATE)).toEqual([STICKY_MARKER]);
+    expect(annotation.tagMap.get(STICKY_TAG)).toBe(MARKER_TAG_TYPE);
     expect(annotation.relationMap.get(RELATION_PREDICATE)).toEqual([itemURI(note)]);
-    expect(note.relationMap.get(TYPE_PREDICATE)).toEqual([NOTE_MARKER]);
+    expect(note.tagMap.get(NOTE_TAG)).toBe(MARKER_TAG_TYPE);
     expect(note.relationMap.get(RELATION_PREDICATE)).toEqual([itemURI(annotation)]);
     expect(executeTransaction).toHaveBeenCalledOnce();
     expect(annotation.save).toHaveBeenCalledOnce();
@@ -232,22 +255,30 @@ describe("sticky-note relationships", () => {
   });
 
   it("reloads cached relations when the linking transaction rolls back", async () => {
-    const annotation = makeItem({
-      id: 21,
-      key: "ANNOTATION",
-      libraryID: 7,
-      annotationType: "note",
-      isAnnotation: () => true,
-    });
+    const annotation = makeItem(
+      {
+        id: 21,
+        key: "ANNOTATION",
+        libraryID: 7,
+        annotationType: "note",
+        isAnnotation: () => true,
+      },
+      {},
+      [{ tag: STICKY_TAG, type: 1 }],
+    );
     const note = makeItem({ id: 22, key: "NOTE", libraryID: 7 });
     installZoteroMock([annotation, note]);
     (note.save as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("transaction failed"));
 
     await expect(linkStickyAndNote(annotation, note)).rejects.toThrow("transaction failed");
 
-    expect(annotation.reload).toHaveBeenCalledWith(["relations"], true);
-    expect(note.reload).toHaveBeenCalledWith(["relations"], true);
-    expect((Zotero as any).Relations.unregister).toHaveBeenCalledTimes(4);
+    expect(annotation.reload).toHaveBeenCalledWith(["relations", "tags"], true);
+    expect(note.reload).toHaveBeenCalledWith(["relations", "tags"], true);
+    expect(annotation._clearChanged).toHaveBeenCalledWith("tags");
+    expect(note._clearChanged).toHaveBeenCalledWith("tags");
+    expect((Zotero as any).Relations.unregister).toHaveBeenCalledTimes(2);
+    expect(annotation.tagMap.get(STICKY_TAG)).toBe(1);
+    expect(note.tagMap.size).toBe(0);
   });
 
   it("refuses to create cross-library links before starting a transaction", async () => {

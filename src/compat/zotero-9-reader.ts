@@ -59,11 +59,11 @@ interface PlacementCapture {
   internal: any;
   manager: any;
   active: boolean;
-  settingInitialTool: boolean;
-  originalSetTool: (...args: any[]) => any;
-  wrappedSetTool: (...args: any[]) => any;
-  originalAddAnnotation: (...args: any[]) => any;
-  wrappedAddAnnotation: (...args: any[]) => any;
+  color: string;
+  initialAnnotationIDs: Set<string>;
+  bindings: Array<{ window: Window; pointerDown: (event: Event) => void }>;
+  checkScheduled: boolean;
+  toolPoll?: ReturnType<typeof setInterval>;
   onCaptured: (key: string) => void;
   onCancelled: () => void;
 }
@@ -169,9 +169,34 @@ function installReaderOpenMonitor(): void {
   readerOpenMonitor = monitor;
 }
 
-function readerViews(reader: ReaderLike): any[] {
+/**
+ * Zotero's ReaderEvent exposes a chrome-side ReaderInstance. Its bundled
+ * reader lives in the iframe global and is intentionally reached through
+ * wrappedJSObject. `_internalReader` is retained only as a test/older-build
+ * fallback; direct access can be filtered by Gecko's Xray wrapper.
+ */
+function getInternalReader(reader: ReaderLike): any | undefined {
+  let wrappedError: unknown;
+  try {
+    const internal = (reader._iframeWindow as any)?.wrappedJSObject?._reader;
+    if (internal) return internal;
+  } catch (error) {
+    wrappedError = error;
+  }
   try {
     const internal = reader._internalReader;
+    if (internal) return internal;
+  } catch (error) {
+    logError(error);
+    return undefined;
+  }
+  if (wrappedError) logError(wrappedError);
+  return undefined;
+}
+
+function readerViews(reader: ReaderLike): any[] {
+  try {
+    const internal = getInternalReader(reader);
     return [internal?._primaryView, internal?._secondaryView].filter(Boolean);
   } catch (error) {
     logError(error);
@@ -191,7 +216,9 @@ function getLiveReaderWindow(reader: ReaderLike): ReaderLike["_window"] | undefi
 function isReaderLive(reader: ReaderLike): boolean {
   try {
     const readers = ((Zotero.Reader as any)._readers ?? []) as ReaderLike[];
-    return readers.includes(reader) && !reader._window?.closed && Boolean(reader._internalReader);
+    return (
+      readers.includes(reader) && !reader._window?.closed && Boolean(getInternalReader(reader))
+    );
   } catch {
     return false;
   }
@@ -218,7 +245,7 @@ function selectedAnnotationAtPointer(
   const position = view.pointerEventToPosition?.(event);
   if (!position) return undefined;
   const selectable = view.getSelectableAnnotations?.(position) ?? [];
-  const selectedIDs = reader._internalReader?._state?.selectedAnnotationIDs ?? [];
+  const selectedIDs = getInternalReader(reader)?._state?.selectedAnnotationIDs ?? [];
   if (selectedIDs.length !== 1) return undefined;
   const selectedID = selectedIDs[0];
   if (!selectable.some((annotation: { id?: string }) => annotation.id === selectedID)) {
@@ -350,14 +377,17 @@ async function bindStickyActivationToView(
       if (!isCurrentHookSession(session)) return;
       const annotation = selectedAnnotationAtPointer(reader, view, pointer);
       if (!annotation) return;
-      await annotation.loadDataType?.("relations");
+      await Promise.all([
+        annotation.loadDataType?.("relations"),
+        annotation.loadDataType?.("tags"),
+      ]);
       if (!isCurrentHookSession(session)) return;
       if (!isPluginSticky(annotation)) return;
       const now = Date.now();
       if (annotation.key === lastActivation && now - lastActivationTime < 300) return;
       lastActivation = annotation.key;
       lastActivationTime = now;
-      reader._internalReader?._updateState?.(
+      getInternalReader(reader)?._updateState?.(
         cloneIntoReader(reader, {
           primaryViewAnnotationPopup: null,
           secondaryViewAnnotationPopup: null,
@@ -391,7 +421,7 @@ function installViewLifecycleHook(
   session: number,
 ): void {
   if (!isCurrentHookSession(session)) return;
-  const internal = reader._internalReader;
+  const internal = getInternalReader(reader);
   if (!internal?._createView) return;
   const existing = viewLifecycleHooks.find((hook) => hook.internal === internal);
   if (existing) {
@@ -439,15 +469,22 @@ export async function bindStickyActivation(
 function removePlacementCapture(capture: PlacementCapture, notifyCancellation: boolean): void {
   if (!capture.active) return;
   capture.active = false;
-  try {
-    if (capture.internal.setTool === capture.wrappedSetTool) {
-      capture.internal.setTool = capture.originalSetTool;
+  if (capture.toolPoll) clearInterval(capture.toolPoll);
+  for (const binding of capture.bindings) {
+    try {
+      binding.window.removeEventListener(
+        "pointerdown",
+        binding.pointerDown,
+        POINTER_LISTENER_CAPTURE,
+      );
+      binding.window.removeEventListener(
+        "mousedown",
+        binding.pointerDown,
+        POINTER_LISTENER_CAPTURE,
+      );
+    } catch (error) {
+      logError(error);
     }
-    if (capture.manager.addAnnotation === capture.wrappedAddAnnotation) {
-      capture.manager.addAnnotation = capture.originalAddAnnotation;
-    }
-  } catch (error) {
-    logError(error);
   }
   const index = placementCaptures.indexOf(capture);
   if (index >= 0) placementCaptures.splice(index, 1);
@@ -460,10 +497,78 @@ function removePlacementCapture(capture: PlacementCapture, notifyCancellation: b
   }
 }
 
+function annotationIDs(manager: any): Set<string> {
+  if (!Array.isArray(manager?._annotations)) {
+    throw new Error("Zotero reader annotation state is unavailable");
+  }
+  const ids = new Set<string>();
+  for (let index = 0; index < manager._annotations.length; index += 1) {
+    const id = manager._annotations[index]?.id;
+    if (id !== undefined && id !== null) ids.add(String(id));
+  }
+  return ids;
+}
+
+function normalizeColor(color: unknown): string {
+  return typeof color === "string" ? color.toLowerCase() : "";
+}
+
+function captureNewPlacedNote(capture: PlacementCapture): boolean {
+  if (!capture.active || !Array.isArray(capture.manager?._annotations)) return false;
+  const notes: Array<{ id: unknown }> = [];
+  for (let index = 0; index < capture.manager._annotations.length; index += 1) {
+    const annotation = capture.manager._annotations[index] as
+      | { id?: unknown; type?: unknown; color?: unknown }
+      | undefined;
+    if (
+      annotation?.id !== undefined &&
+      annotation.id !== null &&
+      !capture.initialAnnotationIDs.has(String(annotation.id)) &&
+      annotation.type === "note" &&
+      normalizeColor(annotation.color) === normalizeColor(capture.color)
+    ) {
+      notes.push({ id: annotation.id });
+    }
+  }
+  if (notes.length !== 1) {
+    if (notes.length > 1) {
+      logError(new Error("Zotero created multiple matching notes during one placement"));
+      removePlacementCapture(capture, true);
+    }
+    return false;
+  }
+
+  const key = String(notes[0].id);
+  removePlacementCapture(capture, false);
+  try {
+    capture.onCaptured(key);
+  } catch (error) {
+    logError(error);
+  }
+  return true;
+}
+
+function placementToolChanged(capture: PlacementCapture): boolean {
+  const tool = capture.internal?._state?.tool;
+  return tool?.type !== "note" || normalizeColor(tool.color) !== normalizeColor(capture.color);
+}
+
+function schedulePlacementCheck(capture: PlacementCapture): void {
+  if (!capture.active || capture.checkScheduled) return;
+  capture.checkScheduled = true;
+  void Promise.resolve().then(() => {
+    capture.checkScheduled = false;
+    if (!capture.active || captureNewPlacedNote(capture)) return;
+    if (placementToolChanged(capture)) removePlacementCapture(capture, true);
+  });
+}
+
 /**
  * Select Zotero's native note tool and capture the exact annotation key it
- * creates. Any later tool change cancels the one-shot capture, preventing an
- * unrelated native note from being claimed by the plugin.
+ * creates. Zotero's view listener is installed first and synchronously adds a
+ * note to the annotation manager during pointerdown/mousedown. Diffing that
+ * state from a later listener on the same event avoids mutating reader methods
+ * across Gecko compartments.
  */
 export function beginReaderNotePlacement(
   reader: ReaderLike,
@@ -472,9 +577,27 @@ export function beginReaderNotePlacement(
   onCancelled: () => void,
 ): (() => void) | undefined {
   try {
-    const internal = reader._internalReader;
+    const internal = getInternalReader(reader);
     const manager = internal?._annotationManager;
-    if (typeof internal?.setTool !== "function" || typeof manager?.addAnnotation !== "function") {
+    const viewWindows = [
+      ...new Set(
+        readerViews(reader)
+          .map((view) => view?._iframeWindow as Window | undefined)
+          .filter((window): window is Window => Boolean(window && !window.closed)),
+      ),
+    ];
+    if (
+      typeof internal?.setTool !== "function" ||
+      !Array.isArray(manager?._annotations) ||
+      !viewWindows.length
+    ) {
+      logError(
+        new Error(
+          `Reader placement interface unavailable in Zotero ${Zotero.version} ` +
+            `(internal=${Boolean(internal)}, setTool=${typeof internal?.setTool}, ` +
+            `annotations=${Array.isArray(manager?._annotations)}, views=${viewWindows.length})`,
+        ),
+      );
       return undefined;
     }
     for (const existing of [...placementCaptures]) {
@@ -486,59 +609,58 @@ export function beginReaderNotePlacement(
       internal,
       manager,
       active: true,
-      settingInitialTool: false,
-      originalSetTool: internal.setTool,
-      wrappedSetTool: undefined as unknown as (...args: any[]) => any,
-      originalAddAnnotation: manager.addAnnotation,
-      wrappedAddAnnotation: undefined as unknown as (...args: any[]) => any,
+      color,
+      initialAnnotationIDs: annotationIDs(manager),
+      bindings: [],
+      checkScheduled: false,
       onCaptured,
       onCancelled,
     };
 
-    const wrappedSetTool = function (this: any, ...args: any[]) {
-      const result = capture.originalSetTool.apply(this, args);
-      if (capture.active && !capture.settingInitialTool) {
-        removePlacementCapture(capture, true);
-      }
-      return result;
-    };
-    capture.wrappedSetTool = exportIntoReader(reader, wrappedSetTool);
-
-    const wrappedAddAnnotation = function (this: any, ...args: any[]) {
-      const result = capture.originalAddAnnotation.apply(this, args);
-      if (!capture.active) return result;
-      const annotation = result ?? args[0];
-      if (result && annotation?.type === "note" && annotation?.id) {
-        const key = String(annotation.id);
-        removePlacementCapture(capture, false);
-        try {
-          capture.onCaptured(key);
-        } catch (error) {
-          logError(error);
-        }
-      } else {
-        removePlacementCapture(capture, true);
-      }
-      return result;
-    };
-    capture.wrappedAddAnnotation = exportIntoReader(reader, wrappedAddAnnotation);
-
-    internal.setTool = capture.wrappedSetTool;
-    manager.addAnnotation = capture.wrappedAddAnnotation;
     placementCaptures.push(capture);
-    capture.settingInitialTool = true;
+    for (const window of viewWindows) {
+      const pointerDown = (event: Event) => {
+        if (!capture.active) return;
+        const pointer = event as PointerEvent;
+        // Zotero intentionally ignores mouse pointerdown and creates the note
+        // from the following mousedown so it can use MouseEvent.detail.
+        if (event.type === "pointerdown" && pointer.pointerType === "mouse") return;
+        if (typeof pointer.button === "number" && pointer.button !== 0) return;
+        if (captureNewPlacedNote(capture)) return;
+        // The initialized 9.0.6 view installs its native capture listener
+        // first. Keep a microtask fallback for an unusually early toolbar
+        // click where this listener may run first; the native handler still
+        // creates the note synchronously before the event dispatch completes.
+        schedulePlacementCheck(capture);
+      };
+      window.addEventListener("pointerdown", pointerDown, POINTER_LISTENER_CAPTURE);
+      window.addEventListener("mousedown", pointerDown, POINTER_LISTENER_CAPTURE);
+      capture.bindings.push({ window, pointerDown });
+    }
     try {
       internal.setTool(cloneIntoReader(reader, { type: "note", color }));
     } catch (error) {
       removePlacementCapture(capture, false);
       throw error;
-    } finally {
-      capture.settingInitialTool = false;
     }
-    if (internal._state?.tool?.type !== "note") {
+    if (
+      internal._state?.tool?.type !== "note" ||
+      normalizeColor(internal._state?.tool?.color) !== normalizeColor(color)
+    ) {
+      logError(
+        new Error(
+          `Zotero ${Zotero.version} refused the requested note tool ` +
+            `(readOnly=${Boolean(internal._state?.readOnly)})`,
+        ),
+      );
       removePlacementCapture(capture, false);
       return undefined;
     }
+    capture.toolPoll = setInterval(() => {
+      if (!capture.active) return;
+      if (placementToolChanged(capture)) removePlacementCapture(capture, true);
+    }, 50);
+    ensureReaderCleanupBinding(reader);
     return () => removePlacementCapture(capture, false);
   } catch (error) {
     logError(error);
@@ -548,7 +670,7 @@ export function beginReaderNotePlacement(
 
 export function enableImmediateAnnotationSaving(reader: ReaderLike): void {
   try {
-    const internal = reader._internalReader;
+    const internal = getInternalReader(reader);
     const manager = internal?._annotationManager;
     if (!manager) return;
 
@@ -727,7 +849,7 @@ export async function waitForReader(reader: ReaderLike, signal?: AbortSignal): P
     );
   }
   const deadline = Date.now() + READER_INIT_TIMEOUT_MS;
-  while (!reader._internalReader && Date.now() < deadline) {
+  while (!getInternalReader(reader) && Date.now() < deadline) {
     if (signal?.aborted) {
       const error = new Error("The plugin operation was cancelled");
       error.name = "AbortError";
@@ -736,7 +858,7 @@ export async function waitForReader(reader: ReaderLike, signal?: AbortSignal): P
     if (reader._window?.closed) throw new Error("The Zotero reader window closed during startup");
     await delay(25);
   }
-  if (!reader._internalReader) {
+  if (!getInternalReader(reader)) {
     throw new Error("Zotero reader did not initialize");
   }
 }
@@ -744,7 +866,7 @@ export async function waitForReader(reader: ReaderLike, signal?: AbortSignal): P
 /** Zotero 9 exposes tool selection only on the bundled reader implementation. */
 export function setReaderTool(reader: ReaderLike, tool: Record<string, unknown>): boolean {
   try {
-    const internal = reader._internalReader;
+    const internal = getInternalReader(reader);
     if (!internal?.setTool || typeof tool.type !== "string") return false;
     internal.setTool(cloneIntoReader(reader, tool));
     // Zotero silently ignores non-navigation tools when the reader is read-only.
@@ -877,7 +999,8 @@ export async function flushReaderAnnotations(reader: ReaderLike): Promise<void> 
       "Zotero failed to save handwritten annotations and switched the reader to read-only mode",
     );
   }
-  const manager = reader._internalReader?._annotationManager;
+  const internal = getInternalReader(reader);
+  const manager = internal?._annotationManager;
   if (!manager?._triggerSaving || !manager?._unsavedAnnotations) {
     throw new Error(
       `Annotation save barrier is unavailable in Zotero ${Zotero.version}; tested with ${TESTED_ZOTERO_VERSION}`,
@@ -885,7 +1008,7 @@ export async function flushReaderAnnotations(reader: ReaderLike): Promise<void> 
   }
 
   const previousSkip = manager._skipAnnotationSavingDebounce;
-  const initiallyReadOnly = Boolean(reader._internalReader?._state?.readOnly);
+  const initiallyReadOnly = Boolean(internal?._state?.readOnly);
   manager._skipAnnotationSavingDebounce = true;
   const deadline = Date.now() + 15_000;
   try {
@@ -893,10 +1016,7 @@ export async function flushReaderAnnotations(reader: ReaderLike): Promise<void> 
       if (!manager._savingInProgress && manager._unsavedAnnotations.size > 0) {
         await manager._triggerSaving();
       }
-      if (
-        readerSaveFailureDetected(reader) ||
-        (!initiallyReadOnly && reader._internalReader?._state?.readOnly)
-      ) {
+      if (readerSaveFailureDetected(reader) || (!initiallyReadOnly && internal?._state?.readOnly)) {
         markReaderSaveFailure(reader);
         throw new Error(
           "Zotero failed to save handwritten annotations and switched the reader to read-only mode",
@@ -1037,7 +1157,7 @@ export function freezeReaders(readers: ReaderLike[]): void {
   for (const reader of readers) {
     if (!isReaderLive(reader)) continue;
     try {
-      reader._internalReader?.freeze?.();
+      getInternalReader(reader)?.freeze?.();
     } catch (error) {
       logError(error);
     }
@@ -1048,7 +1168,7 @@ export function unfreezeReaders(readers: ReaderLike[]): void {
   for (const reader of readers) {
     if (!isReaderLive(reader)) continue;
     try {
-      reader._internalReader?.unfreeze?.();
+      getInternalReader(reader)?.unfreeze?.();
     } catch (error) {
       logError(error);
     }
@@ -1080,20 +1200,21 @@ export async function reloadReaders(
     // setting explicitly instead of relying on a toolbar re-render side effect.
     enableImmediateAnnotationSaving(reader);
   }
+  const activeInternal = activeReader ? getInternalReader(activeReader) : undefined;
   if (
     activeReader &&
     isReaderLive(activeReader) &&
-    activeReader._internalReader?.navigate &&
+    activeInternal?.navigate &&
     activeReader._iframeWindow
   ) {
     const location = Components.utils.cloneInto({ pageIndex }, activeReader._iframeWindow);
-    await activeReader._internalReader.navigate(location);
+    await activeInternal.navigate(location);
   }
 }
 
 function closeGuardHasPending(guard: CloseGuard): boolean {
   try {
-    const manager = guard.reader._internalReader?._annotationManager;
+    const manager = getInternalReader(guard.reader)?._annotationManager;
     return Boolean(
       readerSaveFailureDetected(guard.reader) ||
       readerDeleteFailureDetected(guard.reader) ||

@@ -34,10 +34,10 @@ manifest 的 `strict_min_version` 和 `strict_max_version` 均为 `9.0.6`，运�
 Bibliographic item
 ├── Source PDF attachment
 │   └── Zotero note annotation
-│       ├── dc:type → urn:zotero-pdf-sticky-notes:sticky:v1
+│       ├── Zotero tag → zotero-pdf-sticky-notes:sticky:v1
 │       └── dc:relation → note attachment Zotero item URI
 └── Notes PDF attachment
-    ├── dc:type → urn:zotero-pdf-sticky-notes:note:v1
+    ├── Zotero tag → zotero-pdf-sticky-notes:note:v1
     └── dc:relation → annotation Zotero item URI
 ```
 
@@ -61,6 +61,7 @@ Zotero item URI 编码 library 归属和稳定 item key。附件标题不是关�
 | ------------------------------- | ------------------------------------------------------------------ |
 | `src/plugin.ts`                 | 生命周期、工具栏入口、放置状态、notifier、用户流程协调             |
 | `src/compat/zotero-9-reader.ts` | Zotero 9.0.6 阅读器私有 API、单击、窗口、open/保存屏障、冻结和刷新 |
+| `src/compat/zotero-9-data.ts`   | Zotero 9.0.6 条目事务回滚后的 tag dirty-state 兼容处理             |
 | `src/relations.ts`              | 类型标识、双向 URI 关联和关联解析                                  |
 | `src/notes/note-service.ts`     | 创建附件、部分失败回滚、文件可用性检查、加页事务                   |
 | `src/pdf/pdf-document.ts`       | 创建空白 PDF、追加页面和页数校验                                   |
@@ -86,18 +87,21 @@ Zotero item URI 编码 library 归属和稳定 item key。附件标题不是关�
 创建的附件依次命名为 `Sticky Notes 1.pdf`、`Sticky Notes 2.pdf` 等，避免覆盖同一父条目下
 已有标题。
 
-失败时只回滚本次新建的便签和附件。关系事务回滚后，显式撤销本次写入在
-`Zotero.Relations` 全局索引中的注册，再重载两个条目的 relations 缓存，避免数据库、索引与
-当前会话的 DataObject 状态不一致。若 Zotero 拒绝删除其中一项，则向用户报告并记录
+失败时只回滚本次新建的便签和附件。关系事务回滚后，显式撤销本次写入的 marker tag 和在
+`Zotero.Relations` 全局索引中的注册，再重载两个条目的 relations/tags 缓存，避免数据库、
+索引与当前会话的 DataObject 状态不一致。若 Zotero 拒绝删除其中一项，则向用户报告并记录
 annotation 和 attachment 标识，避免把不完整清理静默当作成功。正常用户删除便签时不删除
 笔记附件。
 
 无父条目的原文会在进入放置模式前被拒绝。只读条目或 `filesEditable = false` 的 library 也
 会被拒绝。
 
-放置状态以 source attachment ID 为键，有效期 60 秒。兼容层一次性包装原生
-`annotationManager.addAnnotation`，记录这次操作生成的精确 annotation key；notifier 只有同时
-匹配该 key 和 reader instance ID 才会创建笔记附件。用户切换工具会立即取消捕获，避免把
+放置状态以 source attachment ID 为键，有效期 60 秒。兼容层从
+`reader._iframeWindow.wrappedJSObject._reader` 取得 Zotero 的实际 reader，选择原生 note
+工具，并在 PDF view 的原生 capture listener 之后监听同一次 `pointerdown`/`mousedown`。
+Zotero 同步写入 `_annotationManager._annotations` 后，插件以放置前后的 ID 差集取得唯一的
+annotation key；它不再跨 Gecko compartment 覆写 `setTool` 或 `addAnnotation`。notifier 只有
+同时匹配该 key 和 reader instance ID 才会创建笔记附件。用户切换工具会取消捕获，避免把
 普通原生便签误认成插件便签。超时会清除 pending state、切回 pointer 工具并显示提示。
 
 ## 打开流程
@@ -234,16 +238,22 @@ settlement barrier；底层下载真正 resolve/reject 前，后续打开或加�
 这表明实现接入 Zotero 的同步状态机，但不构成同步支持声明。双 profile 往返仍为
 `NOT RUN`。
 
+桌面 XPI 不会在 Zotero iOS/iPadOS 客户端运行。普通 stored-file 笔记 PDF 和 Zotero 原生
+ink annotation 属于可同步的数据形态，因此设计目标包括“Mac 创建、iPad 从同一文献的附件
+列表打开并书写、Mac 再打开”的伴随流程；真实设备往返仍为 `NOT RUN`。iPad 上的便签单击
+跳转和 PDF 加页需要 iOS 客户端原生支持，不由本兼容层提供。
+
 ## 兼容边界
 
 以下版本敏感访问集中在 `src/compat/zotero-9-reader.ts`：
 
-- `_internalReader`
+- `_iframeWindow.wrappedJSObject._reader`（`_internalReader` 仅作旧环境/测试 fallback）
 - `_primaryView` / `_secondaryView`
 - `pointerEventToPosition`
 - `getSelectableAnnotations`
 - `selectedAnnotationIDs`
 - `_annotationManager`
+- `_annotations`
 - `_unsavedAnnotations`
 - `_savingInProgress`
 - `_triggerSaving`
@@ -251,7 +261,6 @@ settlement barrier；底层下载真正 resolve/reject 前，后续打开或加�
 - `_onDeleteAnnotations`
 - `setReadOnly`
 - `setTool`
-- `addAnnotation`
 - Reader `_readers`
 - `Zotero.Reader.open`（启动期 active-open 监控与按 item 加页屏障）
 - `Zotero.PDFWorker._enqueue`（与原生 PDF 文件变换共用写入队列）
@@ -260,6 +269,10 @@ settlement barrier；底层下载真正 resolve/reject 前，后续打开或加�
 - 主窗口 `Zotero_Tabs.close` / `unload`
 - sync runner `delayIndefinite`
 - `Components.utils.cloneInto` / `exportFunction` 跨 reader iframe 边界
+
+`src/compat/zotero-9-data.ts` 另集中封装 Zotero 9.0.6 的
+`DataObject._clearChanged("tags")`：该版本的 tag loader 在事务回滚后会替换缓存值，但不会像
+relation loader 一样清除 dirty bit。
 
 阅读器 toolbar/context-menu event、notifier、attachment import、relations 和 IOUtils 等调用也应
 随目标 Zotero 版本重新核对，但私有 reader 状态是首要兼容风险。
@@ -272,7 +285,7 @@ settlement barrier；底层下载真正 resolve/reject 前，后续打开或加�
 - 注销 reader event listener；
 - 移除 pointer 和 close 监听器；
 - 恢复 annotation manager 原 debounce 配置；
-- 恢复放置、保存、擦除及 view lifecycle 的内部 wrapper；
+- 恢复保存、擦除及 view lifecycle 的内部 wrapper；移除放置事件监听和工具状态 timer；
 - 恢复 `Zotero.Reader.open` 和 reader/tab close wrapper；
 - 移除工具栏节点；
 - 取消放置定时器并切回 pointer；

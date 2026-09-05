@@ -4,7 +4,7 @@ Zotero PDF Sticky Notes 是一个 macOS 优先的 Zotero 插件原型。它允�
 中放置一种特殊的 Zotero 便签批注，并通过单击该便签，打开同一篇文献下独立的手写笔记
 PDF。
 
-> 原型状态：`0.1.0`。当前兼容范围严格锁定为 Zotero `9.0.6`。Zotero 10 和其他
+> 原型状态：`0.1.1`。当前兼容范围严格锁定为 Zotero `9.0.6`。Zotero 10 和其他
 > Zotero 9 小版本尚未验证，插件不会声称兼容这些版本。
 
 ## 当前验证状态
@@ -14,7 +14,7 @@ PDF。
 | 本机环境检测                | macOS 15.6.1（Build 24G90）；Zotero 9.0.6（BuildID 20260707110915） |
 | Zotero 9.0.6 阅读器源码核对 | `SOURCE REVIEW` — 已完成                                            |
 | TypeScript 类型检查         | `PASS`                                                              |
-| 单元测试                    | `PASS` — 45/45                                                      |
+| 单元测试                    | `PASS` — 49/49                                                      |
 | XPI 构建及静态包结构检查    | `PASS`                                                              |
 | macOS/Zotero 完整客户端流程 | `NOT RUN`                                                           |
 | Zotero 数据及附件同步往返   | `NOT RUN`                                                           |
@@ -60,19 +60,19 @@ PDF。
 
 ## 安装原型
 
-1. 获取 `dist/zotero-pdf-sticky-notes-0.1.0.xpi`。
+1. 获取 `dist/zotero-pdf-sticky-notes-0.1.1.xpi`。
 2. 在 Zotero 中打开“工具 → 插件”。
 3. 打开插件管理器的齿轮菜单，选择“从文件安装插件…”。
 4. 选择 `.xpi` 文件，并按提示完成安装。
 5. 重启 Zotero。
 6. 在“工具 → 插件”中确认 Zotero PDF Sticky Notes 已启用。
 
-当前 XPI 仅允许安装到 Zotero 9.0.6。该安装流程尚未在 GUI 中执行，因此状态为
-`NOT RUN`。请勿在日常使用的 Zotero 配置中测试早期原型；应使用独立测试 profile 和测试
-文献库。
+当前 XPI 仅允许安装到 Zotero 9.0.6。`0.1.1` 的安装和完整流程尚未在 GUI 中执行，因此
+状态为 `NOT RUN`。`0.1.0` 使用了同步服务不接受的关系谓词，请勿再安装或用它创建数据；
+升级测试只使用 `0.1.1` 或更高版本。
 
 本次本地原型的 SHA-256：
-`fcb73c262b734f84826a362d43a001cb0694f491c6945618e21d9795393b4a10`。
+`e1ea8af51cec2565ad0fa5fbebf0475b70350df0655ee7bdf0b1315be01a9735`。
 
 ## 使用方法
 
@@ -125,14 +125,15 @@ PDF。
 因此，直接从 Zotero 存储目录复制原始 PDF 文件，不保证其中已经包含手写笔迹。需要一个
 可在其他 PDF 阅读器中独立显示笔迹的文件时，应使用 Zotero 的批注 PDF 导出功能。
 
-便签和笔记附件的关联使用 Zotero item URI 与条目关系保存：
+便签和笔记附件的关联使用 Zotero item URI、条目关系和可同步的 Zotero tag 保存：
 
-- 便签：`dc:type = urn:zotero-pdf-sticky-notes:sticky:v1`
-- 笔记附件：`dc:type = urn:zotero-pdf-sticky-notes:note:v1`
-- 双向关联：`dc:relation`
+- 便签 marker tag：`zotero-pdf-sticky-notes:sticky:v1`
+- 笔记附件 marker tag：`zotero-pdf-sticky-notes:note:v1`
+- 双向关联：`dc:relation`，值只保存真实 Zotero item URI
 
 URI 基于所属 library 和稳定 item key，不依赖附件标题，所以重命名笔记附件不应改变关联。
-重启、重命名和同步往返仍须完成客户端实测后才能标为 `PASS`。
+marker 使用普通 Zotero tag；手工删除这两个 tag 会使插件不再把相应条目识别为插件便签或
+笔记。重启、重命名和同步往返仍须完成客户端实测后才能标为 `PASS`。
 
 更完整的数据模型和写入流程见 [架构说明](docs/ARCHITECTURE.md)。
 
@@ -193,6 +194,25 @@ Zotero 9.0.6 源码显示，“另存为…”会进入 Zotero 的 annotated PDF
 - 在另一配置中书写、加页并同步回来后，页数和笔迹正确；
 - 同步冲突不会造成无提示的数据丢失。
 
+### iPad 手写工作流
+
+`.xpi` 只在 macOS/Windows/Linux 的 Zotero 桌面端运行，不会同步或安装到 Zotero iPad
+客户端。Better Notes 一类插件在桌面端写入的标准 Zotero 数据可以同步并由 iPad 原生界面
+显示，这不表示插件代码在 iPad 上运行。
+
+本项目面向 iPad 的可行工作流是：
+
+1. 在 Mac 上用插件创建便签和普通的 Zotero 管理笔记 PDF；如需多页，先在 Mac 笔记窗口
+   中添加足够的空白页。
+2. 完成 Zotero 数据与文件同步。
+3. 在 iPad 上展开同一文献，从附件列表打开 `Sticky Notes N.pdf`，使用 Apple Pencil 和
+   Zotero 原生画笔书写。
+4. 同步回 Mac 后，再由 Mac 原文中的插件便签打开同一个笔记 PDF。
+
+iPad 原生 Zotero 当前不会运行本插件的便签点击监听器或加页按钮，因此“在 iPad 原文中
+单击特殊便签直接打开关联 PDF”不属于本 XPI 能实现的范围。上述 iPad 往返仍为
+`NOT RUN`，通过真实账户测试前不声称已经支持。
+
 ## 从源码构建
 
 要求：
@@ -217,7 +237,7 @@ npm run check
 构建输出：
 
 ```text
-dist/zotero-pdf-sticky-notes-0.1.0.xpi
+dist/zotero-pdf-sticky-notes-0.1.1.xpi
 ```
 
 `npm run build` 会同步第三方许可证、打包运行时代码、执行类型检查并检查 XPI。`pdf-lib`
@@ -237,6 +257,8 @@ dist/zotero-pdf-sticky-notes-0.1.0.xpi
 - 笔记作为 Zotero 主窗口标签打开且仍在保存时，不要立即使用“移到新窗口”；应等待保存
   完成后再移动。插件要求的便签打开流程本身使用独立窗口。
 - 不处理两个客户端同时修改同一个笔记 PDF 的冲突。
+- iPad 可以使用同步后的普通笔记 PDF 和原生 ink 批注，但不能运行本 XPI；iPad 上需从同一
+  文献的附件列表打开笔记，也不能使用插件的“添加空白页”按钮。
 - Zotero 9.0.6 的部分存储后端可能无法立即取消下载；插件会优先保证文件安全，底层下载在
   后台结束前，同一附件不能再次打开或加页，停用插件也可能被延迟。
 - 同步、完整导出和插件停用后的读取仍为发布前验证项。

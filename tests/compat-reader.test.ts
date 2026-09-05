@@ -25,6 +25,15 @@ function makeWindow(): Window {
   return window;
 }
 
+function inputEvent(type: "pointerdown" | "mousedown", pointerType?: string): Event {
+  const event = new Event(type);
+  Object.defineProperties(event, {
+    button: { value: 0 },
+    pointerType: { value: pointerType },
+  });
+  return event;
+}
+
 function installZoteroMock(readers: ReaderLike[]) {
   vi.stubGlobal("Zotero", {
     Reader: {
@@ -75,46 +84,59 @@ describe("Zotero 9 reader compatibility", () => {
     expect(setReaderTool(accepted, { type: "note" })).toBe(true);
   });
 
-  it("captures the exact native note key created by plugin placement", () => {
+  it("uses the iframe reader and captures the exact native mouse-note key", () => {
     const captured = vi.fn();
     const cancelled = vi.fn();
-    const manager = {
-      addAnnotation(annotation: Record<string, unknown>) {
-        return { ...annotation, id: "ABCD2345" };
-      },
-    };
+    const manager = { _annotations: [] as Array<Record<string, unknown>> };
+    const viewWindow = makeWindow();
     const internal = {
       _state: { tool: { type: "pointer" } },
       _annotationManager: manager,
+      _primaryView: { _iframeWindow: viewWindow },
       setTool(tool: { type: string; [key: string]: unknown }) {
         this._state.tool = tool;
       },
     };
+    viewWindow.addEventListener(
+      "mousedown",
+      () => {
+        if (internal._state.tool.type !== "note") return;
+        manager._annotations.push({ type: "note", color: "#2ea8e5", id: "ABCD2345" });
+        internal._state.tool = { type: "pointer" };
+      },
+      true,
+    );
+    const outerWindow = makeWindow() as Window & { wrappedJSObject: { _reader: typeof internal } };
+    outerWindow.wrappedJSObject = { _reader: internal };
     const reader = {
       itemID: 4,
-      _iframeWindow: makeWindow(),
-      _internalReader: internal,
+      _iframeWindow: outerWindow,
     } as unknown as ReaderLike;
+    Object.defineProperty(reader, "_internalReader", {
+      get: () => {
+        throw new Error("Xray-filtered property");
+      },
+    });
 
     const cancel = beginReaderNotePlacement(reader, "#2ea8e5", captured, cancelled);
     expect(cancel).toBeTypeOf("function");
-    manager.addAnnotation({ type: "note", color: "#2ea8e5", sortIndex: "1" });
+    viewWindow.dispatchEvent(inputEvent("pointerdown", "mouse"));
+    expect(captured).not.toHaveBeenCalled();
+    viewWindow.dispatchEvent(inputEvent("mousedown"));
 
     expect(captured).toHaveBeenCalledWith("ABCD2345");
     expect(cancelled).not.toHaveBeenCalled();
   });
 
-  it("cancels plugin placement when the user changes tools", () => {
+  it("cancels plugin placement when the user changes tools", async () => {
     const captured = vi.fn();
     const cancelled = vi.fn();
-    const manager = {
-      addAnnotation(annotation: Record<string, unknown>) {
-        return { ...annotation, id: "UNRELATED" };
-      },
-    };
+    const manager = { _annotations: [] as Array<Record<string, unknown>> };
+    const viewWindow = makeWindow();
     const internal = {
       _state: { tool: { type: "pointer" } },
       _annotationManager: manager,
+      _primaryView: { _iframeWindow: viewWindow },
       setTool(tool: { type: string; [key: string]: unknown }) {
         this._state.tool = tool;
       },
@@ -127,10 +149,151 @@ describe("Zotero 9 reader compatibility", () => {
 
     beginReaderNotePlacement(reader, "#2ea8e5", captured, cancelled);
     internal.setTool({ type: "ink" });
-    manager.addAnnotation({ type: "note", color: "#ffd400", sortIndex: "2" });
+    viewWindow.dispatchEvent(inputEvent("mousedown"));
+    await Promise.resolve();
 
     expect(cancelled).toHaveBeenCalledOnce();
     expect(captured).not.toHaveBeenCalled();
+  });
+
+  it("captures a pen note even when Zotero immediately auto-disables the note tool", () => {
+    const captured = vi.fn();
+    const manager = { _annotations: [] as Array<Record<string, unknown>> };
+    const viewWindow = makeWindow();
+    const internal = {
+      _state: { tool: { type: "pointer" } },
+      _annotationManager: manager,
+      _primaryView: { _iframeWindow: viewWindow },
+      setTool(tool: { type: string; [key: string]: unknown }) {
+        this._state.tool = tool;
+      },
+    };
+    viewWindow.addEventListener(
+      "pointerdown",
+      (event) => {
+        if ((event as PointerEvent).pointerType === "mouse") return;
+        manager._annotations.push({ type: "note", color: "#2EA8E5", id: "PENCIL01" });
+        internal._state.tool = { type: "pointer" };
+      },
+      true,
+    );
+    const reader = {
+      itemID: 15,
+      _iframeWindow: makeWindow(),
+      _internalReader: internal,
+    } as unknown as ReaderLike;
+
+    beginReaderNotePlacement(reader, "#2ea8e5", captured, vi.fn());
+    viewWindow.dispatchEvent(inputEvent("pointerdown", "pen"));
+
+    expect(captured).toHaveBeenCalledWith("PENCIL01");
+  });
+
+  it("fails closed instead of guessing when one event creates multiple matching notes", () => {
+    const captured = vi.fn();
+    const cancelled = vi.fn();
+    const manager = { _annotations: [] as Array<Record<string, unknown>> };
+    const viewWindow = makeWindow();
+    const internal = {
+      _state: { tool: { type: "pointer" } },
+      _annotationManager: manager,
+      _primaryView: { _iframeWindow: viewWindow },
+      setTool(tool: { type: string; [key: string]: unknown }) {
+        this._state.tool = tool;
+      },
+    };
+    viewWindow.addEventListener(
+      "pointerdown",
+      () => {
+        manager._annotations.push(
+          { type: "note", color: "#2ea8e5", id: "FIRST001" },
+          { type: "note", color: "#2ea8e5", id: "SECOND01" },
+        );
+      },
+      true,
+    );
+    const reader = {
+      itemID: 17,
+      _iframeWindow: makeWindow(),
+      _internalReader: internal,
+    } as unknown as ReaderLike;
+
+    beginReaderNotePlacement(reader, "#2ea8e5", captured, cancelled);
+    viewWindow.dispatchEvent(inputEvent("pointerdown", "pen"));
+    viewWindow.dispatchEvent(inputEvent("pointerdown", "pen"));
+
+    expect(captured).not.toHaveBeenCalled();
+    expect(cancelled).toHaveBeenCalledOnce();
+    expect(Zotero.logError).toHaveBeenCalledOnce();
+  });
+
+  it("captures after event dispatch when an early plugin listener runs before the native one", async () => {
+    const captured = vi.fn();
+    const cancelled = vi.fn();
+    const manager = { _annotations: [] as Array<Record<string, unknown>> };
+    const viewWindow = makeWindow();
+    const internal = {
+      _state: { tool: { type: "pointer" } },
+      _annotationManager: manager,
+      _primaryView: { _iframeWindow: viewWindow },
+      setTool(tool: { type: string; [key: string]: unknown }) {
+        this._state.tool = tool;
+      },
+    };
+    const reader = {
+      itemID: 19,
+      _iframeWindow: makeWindow(),
+      _internalReader: internal,
+    } as unknown as ReaderLike;
+
+    beginReaderNotePlacement(reader, "#2ea8e5", captured, cancelled);
+    viewWindow.addEventListener(
+      "pointerdown",
+      () => {
+        manager._annotations.push({ type: "note", color: "#2ea8e5", id: "EARLY001" });
+        internal._state.tool = { type: "pointer" };
+      },
+      true,
+    );
+    viewWindow.dispatchEvent(inputEvent("pointerdown", "pen"));
+    expect(captured).not.toHaveBeenCalled();
+    await Promise.resolve();
+
+    expect(captured).toHaveBeenCalledWith("EARLY001");
+    expect(cancelled).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a same-color note that appears without a placement event", async () => {
+    vi.useFakeTimers();
+    try {
+      const captured = vi.fn();
+      const cancelled = vi.fn();
+      const manager = { _annotations: [] as Array<Record<string, unknown>> };
+      const viewWindow = makeWindow();
+      const internal = {
+        _state: { tool: { type: "pointer" } },
+        _annotationManager: manager,
+        _primaryView: { _iframeWindow: viewWindow },
+        setTool(tool: { type: string; [key: string]: unknown }) {
+          this._state.tool = tool;
+        },
+      };
+      const reader = {
+        itemID: 20,
+        _iframeWindow: makeWindow(),
+        _internalReader: internal,
+      } as unknown as ReaderLike;
+
+      const cancel = beginReaderNotePlacement(reader, "#2ea8e5", captured, cancelled);
+      manager._annotations.push({ type: "note", color: "#2ea8e5", id: "EXTERNAL" });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(captured).not.toHaveBeenCalled();
+      expect(cancelled).not.toHaveBeenCalled();
+      cancel?.();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("latches a host save failure that Zotero only reports by becoming read-only", async () => {

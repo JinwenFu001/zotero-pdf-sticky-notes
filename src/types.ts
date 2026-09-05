@@ -5,6 +5,7 @@ export interface ZoteroItemLike {
   parentID?: number | false;
   deleted?: boolean;
   annotationType?: string;
+  annotationColor?: string;
   attachmentContentType?: string;
   attachmentSyncState?: number | string;
   attachmentModificationTime?: Promise<number | undefined>;
@@ -19,6 +20,9 @@ export interface ZoteroItemLike {
   getRelationsByPredicate: (predicate: string) => string[];
   addRelation: (predicate: string, object: string) => boolean;
   removeRelation: (predicate: string, object: string) => boolean;
+  getTags?: () => Array<{ tag: string; type?: number }>;
+  addTag?: (tag: string, type?: number) => boolean;
+  removeTag?: (tag: string) => boolean;
   save: (options?: Record<string, unknown>) => Promise<number | boolean>;
   saveTx: (options?: Record<string, unknown>) => Promise<number | boolean>;
   eraseTx?: (options?: Record<string, unknown>) => Promise<boolean | void>;

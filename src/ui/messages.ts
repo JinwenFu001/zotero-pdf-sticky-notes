@@ -26,7 +26,7 @@ const messages = {
     sourceReadOnly: "This library or PDF is read-only.",
     noteReadOnly: "This notes PDF or its library is read-only; a page cannot be added.",
     readerUnsupported:
-      "This Zotero reader does not provide the tested annotation tool interface. No sticky note was created.",
+      "The tested Zotero 9.0.6 annotation interface is not ready or available. Close and reopen this PDF, then try again. No sticky note was created.",
   },
   zh: {
     addSticky: "添加手写便签",
@@ -53,7 +53,8 @@ const messages = {
     pageSavedRefreshFailed: "页面已经保存，但阅读器刷新失败。请重新打开笔记附件。",
     sourceReadOnly: "当前文献库或 PDF 为只读。",
     noteReadOnly: "当前笔记 PDF 或其文献库为只读，无法添加页面。",
-    readerUnsupported: "当前 Zotero 阅读器没有提供已验证的批注工具接口，因此未创建便签。",
+    readerUnsupported:
+      "Zotero 9.0.6 的批注接口尚未就绪或无法访问。请关闭并重新打开当前 PDF 后重试；本次未创建便签。",
   },
 } as const;
 
